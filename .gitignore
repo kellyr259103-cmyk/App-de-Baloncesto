@@ -1,0 +1,26 @@
+# --------------------------------------------------------------------------- #
+#  .gitignore — lo que NUNCA se sube al repositorio                            #
+# --------------------------------------------------------------------------- #
+
+# --- secretos: token de API-Sports y contraseña de PostgreSQL ---------------- #
+# (existe el modelo `prediccion_apuestas/config.ejemplo.json` para copiar)
+config.json
+*.secret.json
+
+# --- cachés del scraper: JSON de ligas descargadas (se regeneran solos) ------ #
+apuestas_cache/*.json
+!apuestas_cache/*_ejemplo.json
+
+# --- basura de Python ------------------------------------------------------- #
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+
+# --- logs y temporales ------------------------------------------------------ #
+*.log
+~$*.xlsx
+Thumbs.db
+.DS_Store

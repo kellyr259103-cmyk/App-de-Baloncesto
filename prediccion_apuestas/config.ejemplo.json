@@ -1,0 +1,13 @@
+{
+  "_comentario": "Copia este archivo como config.json y rellena tus datos. config.json NO se sube al repositorio (está en .gitignore).",
+  "postgres": {
+    "host": "localhost",
+    "port": 5432,
+    "dbname": "paperbet",
+    "user": "postgres",
+    "password": "PEGA_AQUI_TU_PASSWORD"
+  },
+  "api_sports": {
+    "token": "PEGA_AQUI_TU_TOKEN"
+  }
+}
