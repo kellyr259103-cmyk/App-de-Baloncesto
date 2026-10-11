@@ -437,9 +437,8 @@ class PestanaVivo(ttk.Frame):
 
         self.lbl_aviso = tk.Label(
             flujo,
-            text="Aviso: el modelo está entrenado con Euroliga/NBA. Cualquier otra liga "
-                 "(BBL, ACB, Portugal, Chile…) NO está calibrada.",
-            font=F_PEQUE, fg=C_ROJO_FG, anchor="w")
+            text="Elige un partido de la tabla para ver el modelo que se usará.",
+            font=F_PEQUE, fg=C_SUB_FG, anchor="w")
         self.lbl_aviso.grid(row=5, column=0, columnspan=4, sticky="w", pady=(4, 0))
 
         # --- botones de apuesta ---
@@ -912,6 +911,40 @@ class PestanaVivo(ttk.Frame):
                     pass
             threading.Thread(target=guardar, daemon=True).start()
 
+    def _actualizar_aviso(self, modelo, origen: str) -> None:
+        """
+        El pie rojo/verde dice el modelo que SE VA A USAR de verdad.
+
+        Antes era un texto fijo ("está entrenado con Euroliga/NBA, cualquier
+        otra liga NO está calibrada") escrito antes de existir los modelos por
+        liga; mentía siempre. Ahora se recalcula con el modelo real:
+          * verde  -> la liga del partido tiene SU modelo (entrenado con sus
+                      partidos reales).
+          * rojo   -> la liga no tiene modelo y se cae al del Excel.
+        """
+        if modelo is None or not modelo.n:
+            self.lbl_aviso.config(
+                text="Sin modelo usable: no hay datos suficientes para esta liga.",
+                fg=C_ROJO_FG)
+            return
+        if origen.startswith("por liga"):
+            self.lbl_aviso.config(
+                text=f"✅ LIGA CALIBRADA: modelo propio de {modelo.liga} "
+                     f"entrenado con {modelo.n} partidos reales de esa liga.",
+                fg=C_VERDE)
+        elif "sin datos de" in origen:
+            clave = origen.split("sin datos de", 1)[1].strip().rstrip(")")
+            self.lbl_aviso.config(
+                text=f"⚠ Sin modelo propio de {clave} (aún sin partidos "
+                     f"suficientes); se usa el del Excel ({modelo.liga}, "
+                     f"n={modelo.n}).",
+                fg=C_ROJO_FG)
+        else:
+            self.lbl_aviso.config(
+                text=f"Modelo fijado a mano: {modelo.liga} ({origen}, "
+                     f"n={modelo.n}).",
+                fg=C_SUB_FG)
+
     def calcular_flujo(self) -> None:
         p = self._partido_sel
         if p is None:
@@ -929,6 +962,11 @@ class PestanaVivo(ttk.Frame):
                 fg=C_SUB_FG)
         else:
             self.lbl_modelo_info.config(text="", fg=C_SUB_FG)
+
+        # el aviso refleja el modelo que SE VA A USAR de verdad (antes era un
+        # texto fijo de cuando no existían los modelos por liga)
+        self._actualizar_aviso(modelo, origen)
+
         if modelo is None or modelo.n == 0:
             self.lbl_flujo_estado.config(text="Modelo sin datos", fg=C_ROJO_FG)
             self.btn_apostar.config(state="disabled")
