@@ -111,6 +111,14 @@ CREATE TABLE IF NOT EXISTS modelos_liga (
     fuente          TEXT         DEFAULT '',
     entrenado_en    TIMESTAMPTZ  NOT NULL DEFAULT now()
 );
+
+-- Autocalibración del descanso 2Q→3Q: duración medida en partidos reales.
+CREATE TABLE IF NOT EXISTS descansos_liga (
+    liga            TEXT PRIMARY KEY,
+    minutos_medios  DOUBLE PRECISION NOT NULL,
+    n_descansos     INTEGER NOT NULL,
+    ultimo_minuto   DOUBLE PRECISION
+);
 """
 
 
@@ -250,14 +258,15 @@ def guardar_apuesta(a: Apuesta) -> int:
                     INSERT INTO apuestas
                       (evento_id, partido, liga_apuesta, liga_modelo, mercado,
                        seleccion, linea, cuota, stake, prediccion, diferencia,
-                       probabilidad, estado)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                       probabilidad, estado, nota)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                     RETURNING id
                     """,
                     (
                         a.evento_id, a.partido, a.liga_apuesta, a.liga_modelo,
                         a.mercado, a.seleccion, a.linea, a.cuota, a.stake,
                         a.prediccion, a.diferencia, a.probabilidad, a.estado,
+                        a.nota or "",
                     ),
                 )
                 nuevo_id = cur.fetchone()[0]

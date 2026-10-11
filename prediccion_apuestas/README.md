@@ -138,6 +138,78 @@ Como `score.info` conserva `Q1: … | Q2: …` durante **todo** el partido, bast
 - Botones: **Actualizar**, **Resolver pendientes**, **Eliminar seleccionada**.
 - Menú **Base de datos**: `Probar conexión`, `Configurar PostgreSQL...`, `Ver esquema SQL...`
 
+### 5. Regla del descanso 2Q→3Q (`descansos.py`)
+
+El descanso **no dura lo mismo en todas las ligas**, y para apostar en ese hueco
+hace falta una regla definida. Esta es:
+
+| Pieza | Regla |
+|---|---|
+| **Ventana** (se detecta por estado, no por reloj) | Empieza cuando el **2Q está completo** y termina en cuanto **arranca el 3Q**. Se cierra por dos vías: hay puntos del 3Q (`q3` con valor) **o** el reloj ya marca 3T/4T/prórroga. |
+| **Duración por liga** | Tabla `DURACIONES` (15 min: NBA y todas las FIBA). Se sobreescribe por liga en `config.json → "descansos": {"nba": 15, …}`. Si la liga no aparece, `DEFECTO_MINUTOS = 15`. |
+| **Autocalibración** | La app **mide** la duración real de cada descanso (del fin del 2Q al arranque del 3Q) y la guarda en la tabla `descansos_liga`. Con esa medida se puede afinar la tabla. |
+| **Seguro anti-datos-viejos** | Si un partido lleva "en descanso" más minutos que la duración oficial **+ 2 de margen**, la ventana **caduca**: no se apuesta con una línea que ya no refleja el partido (evita el caso de la API dejando de actualizar). |
+
+### 6. Apuesta automática en el descanso (casilla **AUTO**)
+
+Con la casilla **AUTO: apostar en el descanso (2Q→3Q) con Δ ≥** marcada, la app
+hace sola **todo el circuito** en cada ping:
+
+1. **Detecta** los partidos dentro de la ventana 2Q→3Q (regla anterior).
+2. **Verifica** que hay modelo de esa liga, que el mercado está **abierto**, que
+   hay línea y que `|Δ| ≥ umbral` (por defecto **2,0 pts**, configurable con el
+   *spinbox* de al lado).
+3. **Registra la apuesta** en paperbet → aparece sola en el panel **APUESTAS**,
+   con una nota del tipo `AUTO descanso2Q (euroleague): 1Q=45 2Q=44 Δ=+6.2`.
+4. **Nunca repite** la apuesta de un mismo partido (control por `evento_id`).
+5. Al **terminar el partido la resuelve sola** (GANADA / PERDIDA / ANULADA), igual
+   que las apuestas manuales, y puedes ver el total final y el beneficio.
+
+Para que vigile sin parar, activa también **Automático cada N s** (5 s). El contador
+del panel muestra cuántos partidos hay en descanso y cuántas apuestas ha hecho.
+
+> ⚠️ **Solo se apuesta en el descanso**, nunca antes (el 2Q podría seguir) ni
+> después (la línea ya se habría reajustado al 3Q).
+
+### 7. Backtest walk-forward (`backtest.py`) — ¿cómo nos habría ido en 2026?
+
+Responde "si hubiéramos usado esta estrategia en 2026, ¿qué winrate tendríamos?",
+**sin mirar el futuro**:
+
+- Para cada liga se recorren sus partidos **ordenados por fecha**.
+- El modelo de cada partido se entrena **solo con partidos de días anteriores**
+  (ventana expansiva). El partido que se evalúa **nunca** está en su entrenamiento.
+- Se predice con el **1Q y 2Q reales** de ese partido (lo que se sabe en el descanso)
+  y se compara con la línea.
+- Si `|Δ| ≥ umbral` → apuesta; gana si el total final cae del mismo lado.
+
+```
+python backtest.py                      # 2026, umbral 2.0, línea honesta
+python backtest.py --umbrales 0 2 3 5   # comparar umbrales
+python backtest.py --linea media        # proxy inflado (solo informativo)
+python backtest.py --ligas nba euroleague --detallado
+```
+
+**Resultado en 2026 con línea `(1Q+2Q)×2` y umbral 2,0 pts:**
+
+| umbral | apuestas | winrate |
+|---|---|---|
+| 0,0 | 5311 | 71,4 % |
+| 2,0 | 4458 | 75,3 % |
+| 5,0 | 3239 | 80,5 % |
+| 8,0 | 2166 | 85,9 % |
+
+> ⚠️ **Léelo con criterio.** El winrate sube al subir el umbral (el modelo es más
+> confiable cuando más se aleja), pero **el edge procede sobre todo de la
+> reversión a la media entre mitades**, que mide `diagnostico_backtest.py`: con un
+> 1º tiempo **bajo** (67 pts) el 2º anota más el **76 %** de las veces, y con un
+> 1º tiempo **alto** (117 pts) el 2º anota menos el **71 %**. El MCO detecta eso
+> (sus coeficientes salen por debajo del doble ciego), **pero una casa real
+> también lo sabe**: la línea de BetPlay en el descanso ya lo incorpora. Contra una
+> línea de casa de verdad el winrate sería bastante menor que el de estas tablas.
+> El modo `--linea media` (79,9 %) es todavía más optimista: compara contra la media
+> de la liga, un mercado que **no se entera del partido**.
+
 ---
 
 ## Archivos
@@ -151,6 +223,9 @@ Como `score.info` conserva `Q1: … | Q2: …` durante **todo** el partido, bast
 | `base_datos.py` | PostgreSQL: configuración, esquema, CRUD de apuestas (+ tablas de modelos). |
 | `historico.py` | Descarga el histórico de partidos acabados (con cuartos) desde API-Sports. |
 | `modelos.py` | Entrena un modelo MCO por liga con holdout y lo guarda/recupera de PostgreSQL. |
+| `descansos.py` | Regla del descanso 2Q→3Q: ventana, duración por liga, caducidad y autocalibración. |
+| `backtest.py` | Backtest walk-forward de la estrategia del descanso (winrate por liga/umbral). |
+| `diagnostico_backtest.py` | Mide la reversión a la media entre mitades (de dónde sale el edge del backtest). |
 | `config.json` | Conexión a PostgreSQL y token de API-Sports (se crea solo). |
 | `verificar.py` | Comprueba que Python = Excel (23 comprobaciones). |
 | `prueba_vivo.py` | Prueba de humo: ping + predicción + resolución de apuesta. |
@@ -158,6 +233,8 @@ Como `score.info` conserva `Q1: … | Q2: …` durante **todo** el partido, bast
 | `prueba_gui.py` | Prueba de la GUI completa: ventana + ping + apuesta + resolución. |
 | `prueba_ligas.py` | Prueba del cliente genérico: ligas + deporte entero + predicciones por liga. |
 | `prueba_gui_ligas.py` | Prueba de la pestaña EN VIVO con selector de ligas y modo "todas". |
+| `prueba_descansos.py` | Prueba de la regla del descanso: ventana, duración, caducidad y decisión. |
+| `prueba_auto_descanso.py` | Prueba del circuito automático: descanso → apuesta sola → resolución. |
 | `configurar_postgres.ps1` | Prepara PostgreSQL (contraseña y base `paperbet`). |
 | `iniciar.bat` | Lanza la aplicación. |
 
@@ -227,11 +304,14 @@ python prueba_ligas.py       # cliente genérico: ligas + deporte entero + predi
 python prueba_gui_ligas.py   # selector de ligas + modo "todas las ligas"
 python prueba_historico.py   # descarga de histórico desde API-Sports (cuota: 4 peticiones)
 python prueba_modelos.py     # pipeline: descargar → entrenar (con holdout) → guardar → predecir
+python prueba_descansos.py   # regla del descanso 2Q→3Q: ventana, duración, caducidad
+python prueba_auto_descanso.py  # circuito automático: descanso → apuesta sola → resolución
 ```
 
-Las de GUI (`prueba_bd.py`, `prueba_gui.py`, `prueba_gui_ligas.py`) borran las
-apuestas de prueba al terminar. `prueba_historico.py` gasta ~4 peticiones de la
-cuota diaria de API-Sports y `prueba_modelos.py` ~2.
+Las de GUI (`prueba_bd.py`, `prueba_gui.py`, `prueba_gui_ligas.py`,
+`prueba_auto_descanso.py`) borran las apuestas de prueba al terminar.
+`prueba_historico.py` gasta ~4 peticiones de la cuota diaria de API-Sports y
+`prueba_modelos.py` ~2.
 
 ## Diferencias respecto al Excel (a propósito)
 

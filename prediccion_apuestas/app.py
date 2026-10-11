@@ -15,12 +15,14 @@ from __future__ import annotations
 import os
 import sys
 import threading
+import time
 import tkinter as tk
 from datetime import datetime
 from tkinter import filedialog, messagebox, ttk
 
 import api_betplay
 import base_datos
+import descansos
 import historico
 import motor
 import paperbet
@@ -56,6 +58,7 @@ F_PEQUE = ("Calibri", 9)
 RUTA_DEFECTO = motor.EXCEL_POR_DEFECTO
 STAKE_POR_DEFECTO = 10000
 INTERVALO_POR_DEFECTO = 5          # segundos entre pings automáticos
+UMBRAL_POR_DEFECTO = 2.0           # Δ mínimo (pts) para apostar solo en el descanso
 
 
 def f1(v) -> str:
@@ -303,6 +306,12 @@ class PestanaVivo(ttk.Frame):
         self._auto_activo = False
         self._job_auto = None
         self._partido_sel: api_betplay.Partido | None = None
+        # --- apuesta automática en el descanso 2Q→3Q ---
+        self.var_auto_apostar = tk.BooleanVar(value=False)
+        self.var_umbral = tk.DoubleVar(value=UMBRAL_POR_DEFECTO)
+        self._ventanas: dict[int, float] = {}      # evento_id -> marca al abrir
+        self._apuestas_auto: set[int] = set()      # evento_id ya apostados
+        self._transitos: dict[int, tuple[str, float]] = {}  # para medir descansos
         self._construir()
 
     # ------------------------------------------------------------------ UI
@@ -453,6 +462,25 @@ class PestanaVivo(ttk.Frame):
         self.lbl_flujo_estado = tk.Label(botones, text="", font=F_PEQUE, fg=C_SUB_FG)
         self.lbl_flujo_estado.pack(side="left")
 
+        # --- apuesta AUTOMÁTICA en el descanso 2Q→3Q ---
+        auto = tk.Frame(self)
+        auto.pack(fill="x", pady=(0, 4))
+
+        self.chk_auto_apostar = tk.Checkbutton(
+            auto, text="AUTO: apostar en el descanso (2Q→3Q) con Δ ≥",
+            variable=self.var_auto_apostar, font=F_LABEL,
+            command=self.toggle_auto_apostar)
+        self.chk_auto_apostar.pack(side="left")
+
+        tk.Spinbox(auto, from_=0.5, to=20.0, increment=0.5, width=5,
+                   textvariable=self.var_umbral, font=F_TEXTO).pack(
+            side="left", padx=(2, 4))
+        tk.Label(auto, text="pts", font=F_TEXTO).pack(side="left", padx=(0, 10))
+
+        self.lbl_auto_estado = tk.Label(
+            auto, text="AUTO apagado", font=F_PEQUE, fg=C_SUB_FG)
+        self.lbl_auto_estado.pack(side="left")
+
     # ------------------------------------------------------------- acciones
     def hacer_ping(self) -> None:
         if self._ping_en_curso:
@@ -554,6 +582,8 @@ class PestanaVivo(ttk.Frame):
                 text=f"{len(partidos)} partidos · {vivos} en vivo · "
                      f"{resueltas} apuesta(s) resuelta(s)", fg=C_VERDE)
             self.app.refrescar_apuestas()
+        # apuesta automática en el descanso 2Q→3Q (si está activada)
+        self._auto_apostar_en_descanso(partidos)
         # reseleccionar el partido que estábamos mirando
         if self._partido_sel is not None:
             for p in partidos:
@@ -597,7 +627,14 @@ class PestanaVivo(ttk.Frame):
                 estado = "Terminado"
 
             reloj = f"{p.reloj_min}:{p.reloj_seg:02d}" if p.es_vivo else ""
-            periodo = "DESCANSO 2Q" if p.en_descanso_2q else (p.periodo or "—")
+            if p.en_descanso_2q:
+                marca = self._ventanas.get(p.evento_id)
+                restantes = (descansos.duracion_descanso(p.clave_liga)
+                             - (descansos.minutos_desde(marca) or 0.0))
+                periodo = ("DESCANSO 2Q" if restantes <= 0
+                           else f"DESCANSO 2Q ({restantes:.0f}′)")
+            else:
+                periodo = p.periodo or "—"
             if not p.mercado_abierto:
                 mercado = "SUSPENDIDO"
             elif not p.cuota_over_abierta and not p.cuota_under_abierta:
@@ -733,6 +770,147 @@ class PestanaVivo(ttk.Frame):
         except (ValueError, tk.TclError):
             seg = INTERVALO_POR_DEFECTO
         self._job_auto = self.after(seg * 1000, self._programar_auto)
+
+    # -------------------------------------------------- apuesta automática
+    def toggle_auto_apostar(self) -> None:
+        """Enciende/apaga la apuesta automática en el descanso 2Q→3Q."""
+        if self.var_auto_apostar.get():
+            self.lbl_auto_estado.config(
+                text="AUTO: vigilo el descanso de todas las ligas…", fg=C_AZUL)
+            self.lbl_oportunidad.config(
+                text="AUTO activo: se apuesta SOLO en el descanso 2Q→3Q "
+                     "(1Q y 2Q finales) cuando |Δ| ≥ el umbral y el mercado "
+                     "está abierto. Activa 'Automático cada 5 s' para que "
+                     "vigile sin parar.",
+                fg=C_AZUL)
+        else:
+            self._ventanas.clear()
+            self.lbl_auto_estado.config(text="AUTO apagado", fg=C_SUB_FG)
+
+    def _auto_apostar_en_descanso(self, partidos) -> None:
+        """
+        Regla automática, llamada tras cada ping:
+
+          1. Detecta los partidos en el hueco 2Q→3Q (descansos.py).
+          2. Abre la ventana del partido (con su duración por liga) la
+             primera vez que lo ve en descanso.
+          3. Si hay modelo de la liga, |Δ| ≥ umbral, mercado abierto y la
+             ventana no ha caducado → apuesta sola (paperbet) y la registra
+             en el panel de APUESTAS.
+          4. Mide la duración real del descanso para autocalibrar la tabla.
+
+        Nunca repite la apuesta de un mismo partido (control por evento_id).
+        """
+        if not self.var_auto_apostar.get():
+            return
+        try:
+            umbral = float(self.var_umbral.get())
+        except (ValueError, tk.TclError):
+            umbral = UMBRAL_POR_DEFECTO
+
+        en_descanso = 0
+        apostadas = 0
+        ahora = time.time()
+
+        for p in partidos:
+            if p.finalizado:
+                continue
+            # --- medir descansos reales para la autocalibración ---
+            self._vigilar_transito(p, ahora)
+
+            if not descansos.en_ventana_descanso(p):
+                self._ventanas.pop(p.evento_id, None)
+                continue
+            en_descanso += 1
+            marca = self._ventanas.setdefault(p.evento_id, ahora)
+
+            ok, motivo = descansos.puede_apostar(p, p.clave_liga, marca)
+            if not ok:
+                continue
+            if p.evento_id in self._apuestas_auto:
+                continue            # ya apostado en este partido
+            # solo la liga del partido (AUTO por liga)
+            modelo = self.app.modelos_ligas.get(p.clave_liga)
+            if modelo is None or not modelo.n:
+                continue
+
+            res = predecir(modelo, float(p.q1),
+                           None if not p.q2_completo else float(p.q2),
+                           float(p.linea))
+            if res.veredicto not in ("OVER", "UNDER"):
+                continue
+            if abs(res.diferencia) < umbral:
+                continue            # diferencia demasiado pequeña para apostar
+
+            cuota = p.cuota_over if res.veredicto == "OVER" else p.cuota_under
+            if not cuota or cuota <= 1.0:
+                continue
+            try:
+                stake = float(self.var_stake.get())
+            except (ValueError, tk.TclError):
+                stake = float(STAKE_POR_DEFECTO)
+            if stake <= 0:
+                continue
+
+            apuesta = Apuesta(
+                evento_id=p.evento_id,
+                partido=p.nombre,
+                liga_apuesta=p.liga_nombre or "—",
+                liga_modelo=modelo.liga,
+                mercado="TOTAL",
+                seleccion=res.veredicto,
+                linea=float(p.linea),
+                cuota=float(cuota),
+                stake=stake,
+                prediccion=res.prediccion,
+                diferencia=res.diferencia,
+                probabilidad=res.prob_over,
+                estado=paperbet.ESTADO_PENDIENTE,
+                nota=(f"AUTO descanso2Q ({p.clave_liga}): "
+                      f"1Q={p.q1:.0f} 2Q={p.q2:.0f} Δ={res.diferencia:+.1f}"),
+            )
+            if paperbet.validar(apuesta):
+                continue
+            try:
+                id_apuesta = base_datos.guardar_apuesta(apuesta)
+            except base_datos.ErrorBaseDatos as exc:
+                self.lbl_auto_estado.config(
+                    text=f"AUTO: error al guardar ({exc})", fg=C_ROJO_FG)
+                return
+            self._apuestas_auto.add(p.evento_id)
+            apostadas += 1
+            self.app.refrescar_apuestas()
+
+        if apostadas:
+            self.lbl_auto_estado.config(
+                text=f"AUTO: {apostadas} apuesta(s) en el descanso · "
+                     f"{len(self._apuestas_auto)} en total",
+                fg=C_VERDE)
+        elif en_descanso:
+            self.lbl_auto_estado.config(
+                text=f"AUTO: {en_descanso} en descanso, esperando Δ ≥ {umbral:.1f}",
+                fg=C_AZUL)
+
+    def _vigilar_transito(self, p, ahora: float) -> None:
+        """
+        Mide la duración real del descanso 2Q→3Q de cada liga.
+
+        Guarda cuándo se vio por primera vez al partido en descanso; cuando
+        el 3Q arranca, registra los minutos transcurridos (autocalibración).
+        """
+        if descansos.en_ventana_descanso(p):
+            self._transitos.setdefault(p.evento_id, (p.clave_liga, ahora))
+            return
+        marca = self._transitos.pop(p.evento_id, None)
+        if marca and p.q3 is not None and not p.finalizado:
+            liga, t0 = marca
+            minutos = (ahora - t0) / 60.0
+            def guardar():
+                try:
+                    descansos.registrar_descanso_observado(liga, minutos)
+                except Exception:   # noqa: BLE001  (la calibración no puede romper el ping)
+                    pass
+            threading.Thread(target=guardar, daemon=True).start()
 
     def calcular_flujo(self) -> None:
         p = self._partido_sel
