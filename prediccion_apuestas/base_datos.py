@@ -119,6 +119,21 @@ CREATE TABLE IF NOT EXISTS descansos_liga (
     n_descansos     INTEGER NOT NULL,
     ultimo_minuto   DOUBLE PRECISION
 );
+
+-- Memoria de resultados finales.
+-- El feed de la casa es la cartelera del día: retira cada partido en cuanto
+-- termina y NO deja consultar uno concreto (/event/{id}.json -> 404). Sin
+-- guardar aquí el total en cuanto se ve, la apuesta quedaría PENDIENTE para
+-- siempre. Ver resultados.py.
+CREATE TABLE IF NOT EXISTS resultados (
+    evento_id BIGINT PRIMARY KEY,
+    partido   TEXT        NOT NULL DEFAULT '',
+    liga      TEXT        NOT NULL DEFAULT '',
+    total     DOUBLE PRECISION NOT NULL,
+    fuente    TEXT        NOT NULL DEFAULT 'feed',
+    capturado TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS resultados_capturado_idx ON resultados (capturado);
 """
 
 

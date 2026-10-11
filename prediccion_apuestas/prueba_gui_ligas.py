@@ -147,7 +147,14 @@ else:
 print("\n" + "=" * 78)
 print("3) LIGA CONCRETA -> SOLO SUS PARTIDOS")
 print("=" * 78)
-elegida = next(l for l in v.ligas if l.clave == "spain/liga_acb")
+# el feed cambia mucho con la hora del día: si la ACB ya no publica partidos
+# hoy, se prueba con cualquier liga que SÍ tenga partidos ahora mismo
+elegida = next((l for l in v.ligas if l.clave == "spain/liga_acb"), None)
+if elegida is None:
+    con_partidos = {p.clave_liga for p in v.partidos}
+    elegida = next((l for l in v.ligas if l.clave in con_partidos),
+                   v.ligas[0] if v.ligas else None)
+assert elegida is not None, "no quedan ligas en el feed"
 v.var_liga.set(elegida.nombre)
 espera = len(pings)
 a.after(50, v.hacer_ping)
@@ -161,7 +168,7 @@ for p in v.partidos[:4]:
           f"linea={p.linea} mercado={'ABIERTO' if p.mercado_abierto else 'CERRADO'}")
 assert all(p.liga_nombre == elegida.nombre for p in v.partidos), \
     "se coló un partido de otra liga"
-assert len(v.partidos) < 40, "la liga ACB no puede tener 40 partidos hoy"
+assert len(v.partidos) < 40, "una sola liga no puede tener 40 partidos hoy"
 
 print("\n" + "=" * 78)
 print("4) FLUJO 1Q + 2Q SOBRE UN PARTIDO CUALQUIERA")

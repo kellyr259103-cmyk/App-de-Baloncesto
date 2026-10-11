@@ -27,6 +27,7 @@ import descansos
 import historico
 import motor
 import paperbet
+import resultados
 from motor import Modelo, parsear, predecir, fecha_excel_a_texto
 from paperbet import Apuesta
 
@@ -61,6 +62,7 @@ F_PEQUE = ("Calibri", 9)
 RUTA_DEFECTO = motor.EXCEL_POR_DEFECTO
 STAKE_POR_DEFECTO = 10000
 INTERVALO_POR_DEFECTO = 5          # segundos entre pings automáticos
+INTERVALO_RECUPERACION = 600       # seg. mínimos entre búsquedas en API-Sports
 UMBRAL_POR_DEFECTO = 2.0           # Δ mínimo (pts) para apostar solo en el descanso
 # Valor esperado mínimo. 0.0 = que la apuesta sea +EV con la cuota que ofrece
 # la casa (con su margen del ~8%, un Δ pequeño puede ser -EV igualmente).
@@ -376,6 +378,11 @@ class PestanaVivo(ttk.Frame):
         self._ping_en_curso = False
         self._auto_activo = False
         self._job_auto = None
+        # recuperación de apuestas cuyo partido ya salió del feed (ver
+        # `resultados.py`): con suave para no gastar la cuota de API-Sports
+        self._recuperando = False
+        self._ultima_recuperacion = 0.0
+        self._resolviendo_inicio = False
         self._partido_sel: api_betplay.Partido | None = None
         # --- apuesta automática en el descanso 2Q→3Q ---
         # Se recuerda entre sesiones: si la dejaste encendida, al abrir la app
@@ -703,6 +710,10 @@ class PestanaVivo(ttk.Frame):
         self.lbl_ping_estado.config(
             text=f"{len(partidos)} partidos · {vivos} en vivo · {liga_txt}", fg=C_SUB_FG)
         self._poblar_tabla()
+        # guardar el marcador final en cuanto la casa lo enseña: después el
+        # partido sale del feed y no hay forma de volver a leerlo (ver
+        # resultados.py)
+        self.guardar_resultados_en_hilo(partidos)
         # guardar los partidos acabados con sus cuartos (muestras de entrenamiento)
         self.recolectar_en_hilo(partidos)
         # resolver automáticamente las apuestas pendientes de partidos terminados
@@ -712,6 +723,9 @@ class PestanaVivo(ttk.Frame):
                 text=f"{len(partidos)} partidos · {vivos} en vivo · "
                      f"{resueltas} apuesta(s) resuelta(s)", fg=C_VERDE)
             self.app.refrescar_apuestas()
+        # lo que ya no está en el feed (la casa lo retiró) se va a buscar a
+        # API-Sports, como mucho una vez cada 10 minutos
+        self._recuperar_huerfanas(partidos)
         # apuesta automática en el descanso 2Q→3Q (si está activada)
         self._auto_apostar_en_descanso(partidos)
         # reseleccionar el partido que estábamos mirando
@@ -897,6 +911,20 @@ class PestanaVivo(ttk.Frame):
                      f" · +{res} muestras", fg=C_VERDE)
 
         self.app.en_hilo(tarea, al_terminar)
+
+    def guardar_resultados_en_hilo(self, partidos) -> None:
+        """
+        Apunta en PostgreSQL el total final de los partidos acabados.
+
+        La casa retira cada partido del feed en cuanto termina y no deja
+        consultar uno concreto, así que si no se guarda aquí el marcador en
+        esa ventana, la apuesta se quedaría PENDIENTE para siempre.
+        (Ver `resultados.py`.)
+        """
+        if not self.app.db_ok:
+            return
+        self.app.en_hilo(lambda: resultados.guardar_partidos(partidos),
+                         lambda _r: None)
 
     def _mostrar_mejor_oportunidad(self, filas) -> None:
         """Etiqueta destacada con el partido de mayor diferencia."""
@@ -1430,9 +1458,28 @@ class PestanaVivo(ttk.Frame):
         )
 
     def resolver_pendientes(self) -> None:
+        """
+        Botón «✔ Resolver pendientes».
+
+        Miraba **solo la BBL** del prototipo original (`obtener_partidos()` sin
+        liga), así que casi nunca resolvía nada. Ahora recorre las tres
+        fuentes, en orden:
+          1. el feed de baloncesto entero;
+          2. la memoria de resultados (partidos que la casa ya retiró);
+          3. API-Sports, por fecha y liga, para lo que siga sin resultado.
+        """
+
         def tarea():
-            partidos = api_betplay.obtener_partidos()
-            return self._resolver_con(partidos)
+            try:
+                partidos = api_betplay.obtener_partidos_deporte("basketball")
+            except api_betplay.ErrorAPI:
+                partidos = []        # sin feed aún así se puede resolver
+            n = self._resolver_con(partidos)
+            pend = base_datos.apuestas_pendientes()
+            if pend:
+                extra, _siguen = resultados.resolver_con_api(pend)
+                n += extra
+            return n
 
         def al_terminar(res):
             if isinstance(res, Exception):
@@ -1440,8 +1487,74 @@ class PestanaVivo(ttk.Frame):
                 return
             n = res
             self.app.refrescar_apuestas()
+            quedan = len(base_datos.apuestas_pendientes())
             self.lbl_flujo_estado.config(
-                text=f"{n} apuesta(s) resuelta(s).", fg=C_VERDE if n else C_SUB_FG)
+                text=f"{n} apuesta(s) resuelta(s)"
+                     + (f" · quedan {quedan} pendientes" if quedan else ""),
+                fg=C_VERDE if n else C_SUB_FG)
+
+        self.app.en_hilo(tarea, al_terminar)
+
+    def _recuperar_huerfanas(self, partidos) -> None:
+        """
+        Apuestas pendientes cuyo partido YA NO aparece en el feed.
+
+        La casa retira cada partido en cuanto termina y no deja consultar uno
+        concreto, así que su resultado se va a buscar a API-Sports (1 petición
+        por fecha, acotada a la liga de la apuesta). Como mucho una vez cada
+        `INTERVALO_RECUPERACION` segundos, para no gastar la cuota diaria.
+        """
+        if self._recuperando or not self.app.db_ok:
+            return
+        ahora = time.time()
+        if ahora - self._ultima_recuperacion < INTERVALO_RECUPERACION:
+            return
+        en_feed = {p.evento_id for p in partidos}
+        huerfanas = [a for a in base_datos.apuestas_pendientes()
+                     if a.evento_id not in en_feed]
+        if not huerfanas:
+            return
+        self._recuperando = True
+        self._ultima_recuperacion = ahora
+
+        def tarea():
+            n, _siguen = resultados.resolver_con_api(huerfanas)
+            return n
+
+        def al_terminar(res):
+            self._recuperando = False
+            if isinstance(res, Exception) or not res:
+                return
+            self.app.refrescar_apuestas()
+            self.lbl_ping_estado.config(
+                text=(self.lbl_ping_estado.cget("text") or "") +
+                     f" · +{res} resultado(s) recuperado(s)", fg=C_VERDE)
+
+        self.app.en_hilo(tarea, al_terminar)
+
+    def resolver_al_arrancar(self) -> None:
+        """
+        Al abrir la app, resuelve enseguida las apuestas que sigan pendientes
+        con lo que haya en la memoria de resultados (0 peticiones). El resto
+        —partidos que ya salieron del feed— lo recoge `_recuperar_huerfanas`
+        en cuanto llega el primer sondeo.
+        """
+        if self._resolviendo_inicio or not self.app.db_ok:
+            return
+        if not base_datos.apuestas_pendientes():
+            return
+        self._resolviendo_inicio = True
+
+        def tarea():
+            return self._resolver_con([])
+
+        def al_terminar(res):
+            self._resolviendo_inicio = False
+            if isinstance(res, Exception) or not res:
+                return
+            self.app.refrescar_apuestas()
+            self.lbl_flujo_estado.config(
+                text=f"{res} apuesta(s) resuelta(s) al arrancar.", fg=C_VERDE)
 
         self.app.en_hilo(tarea, al_terminar)
 
@@ -1452,16 +1565,37 @@ class PestanaVivo(ttk.Frame):
             return 0
 
     def _resolver_con(self, partidos) -> int:
+        """
+        Resuelve las apuestas pendientes cuyo partido ya ha terminado.
+
+        Mira DOS fuentes, en este orden:
+          1. el feed de este sondeo (lo que la casa enseña ahora mismo);
+          2. la memoria de resultados de `resultados.py`.
+
+        La segunda es imprescindible: el feed es la cartelera del día y retira
+        cada partido en cuanto acaba, además no deja consultar uno concreto
+        (`event/{id}.json` -> 404). Sin esa memoria, cualquier apuesta cuyo
+        partido saliera del feed entre dos sondeos se quedaría PENDIENTE para
+        siempre.
+        """
         pendientes = base_datos.apuestas_pendientes()
         if not pendientes:
             return 0
         indice = {p.evento_id: p for p in partidos}
+        guardados = resultados.detalle(a.evento_id for a in pendientes)
         resueltas = 0
         for a in pendientes:
             p = indice.get(a.evento_id)
-            if p is None or not p.finalizado or p.total_final is None:
+            if p is not None and p.finalizado and p.total_final is not None:
+                total, fuente = float(p.total_final), "feed"
+            else:
+                total, fuente = guardados.get(int(a.evento_id), (None, ""))
+            if total is None:
                 continue
-            paperbet.resolver(a, float(p.total_final))
+            paperbet.resolver(a, total)
+            if fuente == "apisports" and "API-Sports" not in (a.nota or ""):
+                a.nota = (f"{a.nota}  · resultado recuperado de API-Sports "
+                          f"(el partido ya había salido del feed)")
             base_datos.actualizar_resultado(a)
             resueltas += 1
         return resueltas
@@ -1961,6 +2095,9 @@ class App(tk.Tk):
                 self.estado.config(
                     text=self.estado.cget("text") + f"  |  ✅ {base_datos.descripcionConexion()}",
                     fg=C_SUB_FG)
+                # con la BD viva se resuelven enseguida las apuestas que
+                # seguían pendientes (ver `resolver_al_arrancar`)
+                self.pestana_vivo.resolver_al_arrancar()
             else:
                 self.estado.config(
                     text=(self.estado.cget("text") or "") +
