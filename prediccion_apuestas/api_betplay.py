@@ -355,8 +355,12 @@ def _es_total_partido(criterio: str) -> bool:
       * "Total de puntos - Prórroga incluida"              -> SÍ (partido)
       * "Total de puntos de <Equipo> - Prórroga incluida"  -> NO (un solo equipo)
       * "Total de puntos - Cuarto 4" / "- 1.ª parte"       -> NO (un periodo)
-    Y de los totales del partido suelen haber VARIAS ofertas (líneas alternas
-    188,5 / 189,5 / 190,5); se prefiere la que esté abierta.
+
+    NOTA (auditado con `auditoria_auto.py`): en este feed NO hay líneas
+    alternas — cada partido publica UN solo total (0 de 75 con más de una).
+    Sí publica a la vez los otros dos mercados: Hándicap (tipo 1) y Ganador
+    (tipo 2). Ese sí es el respaldo natural si el total se cierra, pero es un
+    mercado de MARGEN y este modelo predice el TOTAL, así que hoy no sirve.
     """
     c = (criterio or "").lower()
     if c.startswith("total de puntos de ") or c.startswith("total points of "):
@@ -412,7 +416,8 @@ def _parsear_evento(bloque: dict) -> Partido:
     p.q4 = cuartos.get("Q4")
 
     # --- mercados ---
-    candidatos_total = []       # totales del partido completo: (abierto, linea, over, under)
+    # (abierto, linea, over, under, over_abierto, under_abierto)
+    candidatos_total: list[tuple] = []
     for oferta in bloque.get("betOffers", []) or []:
         tipo = (oferta.get("betOfferType") or {}).get("id")
         if tipo != ID_TOTAL:
@@ -423,25 +428,38 @@ def _parsear_evento(bloque: dict) -> Partido:
         suspendida = bool(oferta.get("suspended"))
         linea = None
         over = under = None
-        abierto = not suspendida
+        # OJO: cada lado se abre y se cierra POR SEPARADO. La casa puede dejar
+        # el Over operativo y suspender el Under (o al revés) sin tocar la
+        # oferta entera, así que se comprueba el estado de los DOS outcomes.
+        over_abierto = under_abierto = False
         for oc in oferta.get("outcomes", []) or []:
+            abierto_oc = oc.get("status") == "OPEN" and not suspendida
             if oc.get("type") == "OT_OVER":
                 linea = _num(oc.get("line")) or linea
                 over = _num(oc.get("odds"))
-                abierto = abierto and oc.get("status") == "OPEN"
+                over_abierto = abierto_oc
             elif oc.get("type") == "OT_UNDER":
                 linea = _num(oc.get("line")) or linea
                 under = _num(oc.get("odds"))
+                under_abierto = abierto_oc
+        # "abierto" = se puede jugar ALGÚN lado de esta oferta (no hace falta
+        # que los dos lo estén; si no, un solo lado suspendido cerraría el
+        # mercado entero y se perdería la apuesta del otro lado)
+        abierto = not suspendida and (over_abierto or under_abierto)
         if linea is not None:
-            candidatos_total.append((abierto, linea, over, under))
+            candidatos_total.append((abierto, linea, over, under,
+                                     over_abierto, under_abierto))
 
     if candidatos_total:
         abiertos = [c for c in candidatos_total if c[0]]
         # se prefiere un mercado abierto; si todos están suspendidos, el primero
-        (_, p.linea, p.cuota_over, p.cuota_under) = (abiertos or candidatos_total)[0]
+        (_, p.linea, p.cuota_over, p.cuota_under,
+         ov_ab, un_ab) = (abiertos or candidatos_total)[0]
+        # mercado_abierto es GLOBAL: basta una oferta abierta. Lo importante
+        # para apostar es el estado del lado CONCRETO que se quiere jugar.
         p.mercado_abierto = bool(abiertos)
-        p.cuota_over_abierta = p.mercado_abierto and p.cuota_over is not None
-        p.cuota_under_abierta = p.mercado_abierto and p.cuota_under is not None
+        p.cuota_over_abierta = p.mercado_abierto and ov_ab and p.cuota_over is not None
+        p.cuota_under_abierta = p.mercado_abierto and un_ab and p.cuota_under is not None
     return p
 
 

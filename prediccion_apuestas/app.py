@@ -17,6 +17,7 @@ import sys
 import threading
 import time
 import tkinter as tk
+from collections import Counter
 from datetime import datetime
 from tkinter import filedialog, messagebox, ttk
 
@@ -59,6 +60,9 @@ RUTA_DEFECTO = motor.EXCEL_POR_DEFECTO
 STAKE_POR_DEFECTO = 10000
 INTERVALO_POR_DEFECTO = 5          # segundos entre pings automáticos
 UMBRAL_POR_DEFECTO = 2.0           # Δ mínimo (pts) para apostar solo en el descanso
+# Valor esperado mínimo. 0.0 = que la apuesta sea +EV con la cuota que ofrece
+# la casa (con su margen del ~8%, un Δ pequeño puede ser -EV igualmente).
+EV_MINIMA_POR_DEFECTO = 0.0
 
 
 def f1(v) -> str:
@@ -360,6 +364,8 @@ class PestanaVivo(ttk.Frame):
             value=bool(vivo.get("auto_apostar", True)))
         self.var_umbral = tk.DoubleVar(
             value=float(vivo.get("umbral", UMBRAL_POR_DEFECTO)))
+        self.var_ev_min = tk.DoubleVar(
+            value=float(vivo.get("ev_min", EV_MINIMA_POR_DEFECTO)))
         self.var_auto = tk.BooleanVar(
             value=bool(vivo.get("auto", self.var_auto_apostar.get())))
         self.var_intervalo = tk.IntVar(
@@ -367,10 +373,11 @@ class PestanaVivo(ttk.Frame):
         self._ventanas: dict[int, float] = {}      # evento_id -> marca al abrir
         self._apuestas_auto: set[int] = set()      # evento_id ya apostados
         self._transitos: dict[int, tuple[str, float]] = {}  # para medir descansos
+        self._motivos_auto: Counter = Counter()    # por qué NO se apuesta
         self._construir()
         # guardar al cambiar cualquier control (van ya montados)
-        for _v in (self.var_auto, self.var_intervalo,
-                   self.var_auto_apostar, self.var_umbral):
+        for _v in (self.var_auto, self.var_intervalo, self.var_auto_apostar,
+                   self.var_umbral, self.var_ev_min):
             _v.trace_add("write", lambda *_a: self._guardar_vivo())
 
     # ------------------------------------------------------------------ UI
@@ -536,11 +543,20 @@ class PestanaVivo(ttk.Frame):
         tk.Spinbox(auto, from_=0.5, to=20.0, increment=0.5, width=5,
                    textvariable=self.var_umbral, font=F_TEXTO).pack(
             side="left", padx=(2, 4))
-        tk.Label(auto, text="pts", font=F_TEXTO).pack(side="left", padx=(0, 10))
+        tk.Label(auto, text="pts   y EV ≥", font=F_TEXTO).pack(side="left")
+        tk.Spinbox(auto, from_=-20.0, to=60.0, increment=0.5, width=6,
+                   textvariable=self.var_ev_min, font=F_TEXTO).pack(
+            side="left", padx=(2, 4))
+        tk.Label(auto, text="%", font=F_TEXTO).pack(side="left", padx=(0, 10))
 
         self.lbl_auto_estado = tk.Label(
             auto, text="AUTO apagado", font=F_PEQUE, fg=C_SUB_FG)
         self.lbl_auto_estado.pack(side="left")
+
+        # el motivo real por el que no se apuesta (antes era invisible)
+        self.lbl_auto_motivos = tk.Label(
+            self, text="", font=F_PEQUE, fg=C_SUB_FG, anchor="w", justify="left")
+        self.lbl_auto_motivos.pack(fill="x", pady=(0, 2))
 
     def _repack_top(self, _evento=None) -> None:
         """Una sola fila si cabe todo; si no, se reparte en dos (responsive)."""
@@ -875,12 +891,17 @@ class PestanaVivo(ttk.Frame):
         except (ValueError, tk.TclError):
             umbral = UMBRAL_POR_DEFECTO
         try:
+            ev_min = float(self.var_ev_min.get())
+        except (ValueError, tk.TclError):
+            ev_min = EV_MINIMA_POR_DEFECTO
+        try:
             cfg = base_datos.cargar_config()
             cfg["vivo"] = {
                 "auto": bool(self.var_auto.get()),
                 "intervalo": intervalo,
                 "auto_apostar": bool(self.var_auto_apostar.get()),
                 "umbral": umbral,
+                "ev_min": ev_min,
             }
             base_datos.guardar_config(cfg)
         except Exception:   # noqa: BLE001  (guardar la preferencia no puede romper la app)
@@ -933,6 +954,16 @@ class PestanaVivo(ttk.Frame):
           4. Mide la duración real del descanso para autocalibrar la tabla.
 
         Nunca repite la apuesta de un mismo partido (control por evento_id).
+
+        AUDITORÍA (ver `auditoria_auto.py`): aquí se comprueban TRES cosas que
+        antes se ignoraban, porque podían hacer apostar donde la casa no lo
+        tenía disponible:
+          1. el lado concreto que se quiere jugar (`hay_cuota_over/under`),
+             no solo la bandera global `mercado_abierto`;
+          2. la cuota se compara con la probabilidad del modelo → EV ≥ mínimo
+             (con el ~8% de margen de la casa, un Δ pequeño puede ser -EV);
+          3. el motivo real de NO apostar se cuenta y se enseña en el panel
+             (antes todos los `continue` eran silenciosos).
         """
         if not self.var_auto_apostar.get():
             return
@@ -940,9 +971,14 @@ class PestanaVivo(ttk.Frame):
             umbral = float(self.var_umbral.get())
         except (ValueError, tk.TclError):
             umbral = UMBRAL_POR_DEFECTO
+        try:
+            ev_min = float(self.var_ev_min.get()) / 100.0   # el control va en %
+        except (ValueError, tk.TclError):
+            ev_min = EV_MINIMA_POR_DEFECTO / 100.0
 
         en_descanso = 0
         apostadas = 0
+        motivos: Counter = Counter()
         ahora = time.time()
 
         for p in partidos:
@@ -959,25 +995,47 @@ class PestanaVivo(ttk.Frame):
 
             ok, motivo = descansos.puede_apostar(p, p.clave_liga, marca)
             if not ok:
+                motivos[motivo] += 1
                 continue
             if p.evento_id in self._apuestas_auto:
                 continue            # ya apostado en este partido
             # solo la liga del partido (AUTO por liga)
             modelo = self.app.modelos_ligas.get(p.clave_liga)
             if modelo is None or not modelo.n:
+                motivos["sin modelo para esa liga"] += 1
                 continue
 
             res = predecir(modelo, float(p.q1),
                            None if not p.q2_completo else float(p.q2),
                            float(p.linea))
             if res.veredicto not in ("OVER", "UNDER"):
+                motivos["veredicto sin decidir"] += 1
                 continue
             if abs(res.diferencia) < umbral:
-                continue            # diferencia demasiado pequeña para apostar
-
-            cuota = p.cuota_over if res.veredicto == "OVER" else p.cuota_under
-            if not cuota or cuota <= 1.0:
+                motivos[f"|Δ| < {umbral:.1f}"] += 1
                 continue
+
+            # --- ¿la casa tiene ABIERTO el lado que queremos jugar? ---
+            lado = res.veredicto
+            cuota = p.cuota_over if lado == "OVER" else p.cuota_under
+            disponible = p.hay_cuota_over if lado == "OVER" else p.hay_cuota_under
+            if not cuota or cuota <= 1.0:
+                motivos[f"la casa no publica cuota del {lado}"] += 1
+                continue
+            if not disponible:
+                motivos[f"{lado} SUSPENDIDO por la casa"] += 1
+                continue
+
+            # --- ¿es rentable con esa cuota? (EV = P*cuota - 1) ---
+            prob_lado = res.prob_over if lado == "OVER" else (
+                None if res.prob_over is None else 1 - res.prob_over)
+            if prob_lado is None:
+                prob_lado = 0.5
+            esperado = prob_lado * cuota - 1.0
+            if esperado < ev_min:
+                motivos[f"EV {esperado * 100:+.1f}% < {ev_min * 100:.1f}%"] += 1
+                continue
+
             try:
                 stake = float(self.var_stake.get())
             except (ValueError, tk.TclError):
@@ -991,7 +1049,7 @@ class PestanaVivo(ttk.Frame):
                 liga_apuesta=p.liga_nombre or "—",
                 liga_modelo=modelo.liga,
                 mercado="TOTAL",
-                seleccion=res.veredicto,
+                seleccion=lado,
                 linea=float(p.linea),
                 cuota=float(cuota),
                 stake=stake,
@@ -1000,9 +1058,12 @@ class PestanaVivo(ttk.Frame):
                 probabilidad=res.prob_over,
                 estado=paperbet.ESTADO_PENDIENTE,
                 nota=(f"AUTO descanso2Q ({p.clave_liga}): "
-                      f"1Q={p.q1:.0f} 2Q={p.q2:.0f} Δ={res.diferencia:+.1f}"),
+                      f"1Q={p.q1:.0f} 2Q={p.q2:.0f} Δ={res.diferencia:+.1f} "
+                      f"EV={esperado * 100:+.1f}%"),
             )
-            if paperbet.validar(apuesta):
+            error = paperbet.validar(apuesta)
+            if error:
+                motivos[f"apuesta rechazada: {error}"] += 1
                 continue
             try:
                 id_apuesta = base_datos.guardar_apuesta(apuesta)
@@ -1014,15 +1075,29 @@ class PestanaVivo(ttk.Frame):
             apostadas += 1
             self.app.refrescar_apuestas()
 
+        self._motivos_auto = motivos
+        self._mostrar_motivos()
         if apostadas:
             self.lbl_auto_estado.config(
                 text=f"AUTO: {apostadas} apuesta(s) en el descanso · "
                      f"{len(self._apuestas_auto)} en total",
                 fg=C_VERDE)
         elif en_descanso:
+            top = motivos.most_common(1)[0][0] if motivos else ""
             self.lbl_auto_estado.config(
-                text=f"AUTO: {en_descanso} en descanso, esperando Δ ≥ {umbral:.1f}",
+                text=(f"AUTO: {en_descanso} en descanso · "
+                      f"no aposté porque {top}" if top else
+                      f"AUTO: {en_descanso} en descanso, esperando…"),
                 fg=C_AZUL)
+
+    def _mostrar_motivos(self) -> None:
+        """Enseña por qué NO se ha apostado (antes era invisible)."""
+        if not self._motivos_auto:
+            self.lbl_auto_motivos.config(text="")
+            return
+        partes = [f"{n}× {m}" for m, n in self._motivos_auto.most_common(3)]
+        self.lbl_auto_motivos.config(
+            text="No aposté por: " + " · ".join(partes), fg=C_SUB_FG)
 
     def _vigilar_transito(self, p, ahora: float) -> None:
         """

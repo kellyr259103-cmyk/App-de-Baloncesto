@@ -194,6 +194,34 @@ Además, si el contenido no cabe:
 | **EN VIVO** | La barra superior (liga + ping + automático) se reparte en **dos filas** si no cabe todo en una; la tabla absorbe el alto que sobra. |
 | **APUESTAS** | Las 8 cajas de resumen van en **rejilla 4×2** en vez de una fila de 8, así no se salen en pantallas estrechas. |
 
+### 6.2 Auditoría: ¿y si la casa NO tiene la apuesta disponible? (`auditoria_auto.py`)
+
+`python auditoria_auto.py [umbral]` baja la API (1 petición) y recorre la cadena
+de decisiones del bot con datos **reales**, respondiendo: ¿en qué punto se queda
+cada partido?, ¿qué ofrece la casa en su sitio?, ¿cuál sería la mejor apuesta
+realmente disponible por valor esperado?
+
+Lo que destapó, ya corregido:
+
+| Fallo | Antes | Ahora |
+|---|---|---|
+| Lado suspendido | Solo se miraba `cuota is not None`. Si la casa suspendía el **Under** pero conservaba su última cuota, el bot **apostaba igual**. | Usa `p.hay_cuota_over / hay_cuota_under` (estado del lado concreto). |
+| Estado del Under | El parsing solo comprobaba el estado del outcome **Over**. | Se comprueban los **dos** outcomes y el `suspended` de la oferta. |
+| Motivo invisible | Todos los `continue` eran silenciosos: el panel decía *"esperando Δ"* aunque la causa fuera "sin modelo" o "mercado cerrado". | Cada motivo se cuenta y se enseña: *"No aposté por: 1× OVER SUSPENDIDO por la casa"*. |
+| Cuotas ignoradas | Se apuesta por `|Δ| ≥ umbral` sin mirar la cuota. Con el ~8% de margen de la casa, un Δ pequeño es **-EV**. | Puerta de **EV mínimo** (`EV = P × cuota − 1`), por defecto 0 %, configurable junto al umbral. |
+
+Lo que descartó la auditoría (por si se retoman):
+
+- **Elegir entre líneas alternas del total** → no existen: cada partido publica
+  UNA sola línea (0 de 75 con más de una).
+- **Apostar el Hándicap como respaldo** → la casa sí lo publica siempre junto al
+  total (tipo 1), pero es un mercado de **margen** y este modelo predice el
+  **total**: haría falta entrenar un modelo de margen nuevo.
+- **Apostar el lado contrario** si el nuestro está suspendido → sería jugar
+  **contra** el propio modelo. Lo correcto es no apostar y avisar (ya hace).
+
+
+
 ### 7. Backtest walk-forward (`backtest.py`) — ¿cómo nos habría ido en 2026?
 
 Responde "si hubiéramos usado esta estrategia en 2026, ¿qué winrate tendríamos?",
@@ -330,6 +358,8 @@ python prueba_modelos.py     # pipeline: descargar → entrenar (con holdout) �
 python prueba_descansos.py   # regla del descanso 2Q→3Q: ventana, duración, caducidad
 python prueba_auto_descanso.py  # circuito automático: descanso → apuesta sola → resolución
 python prueba_automatico.py     # arranque solo (AUTO + 5 s) + ventana responsive
+python prueba_disponibilidad.py # la casa no tiene el lado disponible / EV negativo
+python auditoria_auto.py        # auditoría real: motivos, mercados y valor esperado
 ```
 
 Las de GUI (`prueba_bd.py`, `prueba_gui.py`, `prueba_gui_ligas.py`,

@@ -117,6 +117,9 @@ assert int(a3.minsize()[1]) <= pantalla_alto - 60
 print("\n" + "=" * 72)
 print("6) Las pestañas no desbordan en vertical")
 print("=" * 72)
+print("   Hay DOS mecanismos de adaptación:\n"
+        "     · barra vertical  -> para contenido FIJO (EUROLIGA / NBA)\n"
+        "     · tabla flexible  -> la tabla absorbe el alto (EN VIVO / APUESTAS)\n")
 for nombre, pestana in [("EUROLIGA", a3.pestanas["EUROLIGA"]),
                         ("NBA", a3.pestanas["NBA"]),
                         ("EN VIVO", a3.pestana_vivo),
@@ -126,21 +129,33 @@ for nombre, pestana in [("EUROLIGA", a3.pestanas["EUROLIGA"]),
     disp = a3.notebook.winfo_height() - 30
     # en EUROLIGA/NBA el contenido real vive dentro del canvas
     panel = getattr(pestana, "_panel", None)
-    alto_req = panel.winfo_reqheight() if panel is not None else pestana.winfo_reqheight()
+    alto_req = (panel.winfo_reqheight() if panel is not None
+                else pestana.winfo_reqheight())
     print(f"   {nombre:9s} contenido = {alto_req:4d} px   disponible ≈ {disp} px")
-    if alto_req > disp + 2:
-        assert panel is not None, (
-            f"{nombre} desborda y no tiene barra de desplazamiento")
-        pestana._panel_configurado()
-        a3.update()
-        assert pestana._vsb_visible, f"en {nombre} debe aparecer la barra"
-        print("            -> desborda: aparece la barra vertical (OK)")
-    else:
+    if alto_req <= disp + 2:
         if panel is not None:
             pestana._panel_configurado()
             a3.update()
             assert not pestana._vsb_visible, "con hueco no debe verse la barra"
-        print("            -> cabe entera sin barra (OK)")
+        print("            -> cabe entera (OK)")
+        continue
+
+    # desborda: tiene que haber un mecanismo que lo evite
+    if panel is not None:
+        pestana._panel_configurado()
+        a3.update()
+        assert pestana._vsb_visible, f"en {nombre} debe aparecer la barra"
+        print("            -> contenido FIJO: aparece la barra vertical (OK)")
+    else:
+        # contenido flexible: la tabla absorbe y la pestaña SÍ cabe
+        alto_real = pestana.winfo_height()
+        print(f"            -> contenido FLEXIBLE: la tabla absorbe "
+              f"(altura real {alto_real} px)")
+        assert alto_real <= disp + 6, (
+            f"{nombre} sigue desbordando: {alto_real} > {disp}")
+        assert int(pestana.tree.cget("height")) >= 1, "la tabla no puede quedar vacía"
+        # y la tabla llena todo el hueco que sobra
+        assert pestana.tree.master.winfo_height() > 20, "la tabla debe crecer"
 
 print("\n" + "=" * 72)
 print("7) Al encoger la ventana, EUROLIGA muestra la barra")
