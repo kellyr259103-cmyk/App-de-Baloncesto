@@ -82,40 +82,67 @@ print(f"   ligas distintas    : "
 print(f"   estado             : {v.lbl_ping_estado.cget('text')}")
 filas = v.tree.get_children()
 assert filas, "la tabla quedó vacía"
-assert len(filas) == len(v.partidos), "la tabla no cuadra con los partidos"
+# las CABECERAS de etapa ("__etapa_N") son filas de sección, no partidos
+cabeceras = [i for i in filas if str(i).startswith("__etapa_")]
+partidos_filas = [i for i in filas if not str(i).startswith("__etapa_")]
+print(f"   filas de partido    : {len(partidos_filas)}")
+print(f"   cabeceras de etapa  : {len(cabeceras)}")
+assert len(partidos_filas) == len(v.partidos), "la tabla no cuadra con los partidos"
 
-valores = v.tree.item(filas[0], "values")
+# cada cabecera debe ir justo ANTES de la primera fila de su etapa
+if partidos_filas:
+    assert cabeceras, "faltan las cabeceras de sección de la tabla"
+    orden_real = list(v.tree.get_children())
+    for cab in cabeceras:
+        n = orden_real.index(cab)
+        assert n + 1 < len(orden_real), f"la cabecera {cab} queda al final"
+        txt = v.tree.item(cab, "values")[0]
+        assert txt and len(txt) > 3, f"cabecera vacía: {cab}"
+        # la fila siguiente debe ser una fila de partido
+        assert not str(orden_real[n + 1]).startswith("__etapa_"), \
+            f"dos cabeceras seguidas en {cab}"
+    print(f"   cabeceras          : "
+          f"{[v.tree.item(c, 'values')[0][:34] for c in cabeceras]}")
+    print("   cada cabecera va delante de su etapa: OK")
+
+valores = v.tree.item(partidos_filas[0], "values")
 print(f"   1ª fila (mejor Δ)  : {valores}")
 assert valores[0] not in ("", "—"), "la columna Liga viene vacía"
-print(f"   fila resaltada     : {v.tree.item(filas[0], 'tags')}")
+print(f"   fila resaltada     : {v.tree.item(partidos_filas[0], 'tags')}")
 print(f"   oportunidad        : {v.lbl_oportunidad.cget('text')}")
 
-# el orden debe ser: (0) predecibles en línea comparable por |Δ| desc,
-# (1) predecibles ya en 4º cuarto, (2) el resto. Se usa el MISMO criterio
-# que la interfaz (PestanaVivo.grupo_fila).
+# el orden debe ser por ETAPA: (0) en descanso 2Q→3Q, (1) aún en 1Q,
+# (2) en 2Q, (3) 3Q/4T, (4) por jugar o terminado; y dentro de cada etapa por
+# |Δ| descendente. Se usa el MISMO criterio que el bot automático
+# (descansos.en_ventana_descanso) y la interfaz (PestanaVivo.grupo_fila).
 por_id = {p.evento_id: p for p in v.partidos}
 grupos, difs = [], []
-for iid in filas:
+for iid in partidos_filas:
     p = por_id[int(iid)]
     res = v._prediccion_de(p)
     grupos.append(mod_app.PestanaVivo.grupo_fila(p, res))
     difs.append(None if res is None else abs(res.diferencia))
 
-assert grupos == sorted(grupos), f"la tabla no está agrupada: {grupos}"
-for g in (0, 1):
+assert grupos == sorted(grupos), f"la tabla no está agrupada por etapas: {grupos}"
+for g in (0, 1, 2):
     dentro_g = [d for d, gg in zip(difs, grupos) if gg == g]
-    assert dentro_g == sorted(dentro_g, reverse=True), \
-        f"el grupo {g} no está ordenado por |Δ|: {dentro_g}"
-print(f"   grupos 0/1/2       : {grupos.count(0)}/{grupos.count(1)}/{grupos.count(2)}")
-print(f"   |Δ| del grupo 0    : "
+    con_dato = [d for d in dentro_g if d is not None]
+    assert con_dato == sorted(con_dato, reverse=True), \
+        f"la etapa {g} no está ordenada por |Δ|: {con_dato}"
+    # las filas sin predicción (sin modelo o sin línea) van al FINAL de su etapa
+    assert dentro_g == con_dato + [d for d in dentro_g if d is None], \
+        f"la etapa {g} mezcla filas sin predicción en medio: {dentro_g}"
+print(f"   etapas 0/1/2/3/4    : " + "/".join(str(grupos.count(g)) for g in range(5)))
+print(f"   |Δ| de la etapa 0   : "
       f"{[round(d, 1) for d, gg in zip(difs, grupos) if gg == 0][:6]} ...")
 if grupos.count(0):
-    assert all(por_id[int(iid)].q2_completo
-               for iid, g in zip(filas, grupos) if g == 0), \
-        "el grupo 0 debe exigir 1Q y 2Q finales"
-    print("   grupo 0 exige 1Q+2Q finales: OK")
+    import descansos as mod_descansos
+    assert all(mod_descansos.en_ventana_descanso(por_id[int(iid)])
+               for iid, g in zip(partidos_filas, grupos) if g == 0), \
+        "la etapa 0 debe ser exactamente la ventana de apuesta del bot"
+    print("   etapa 0 = ventana de apuesta del bot: OK")
 else:
-    print("   (hoy no hay ningún partido con 1Q+2Q acabados)")
+    print("   (hoy no hay ningún partido en el descanso 2Q→3Q)")
 
 print("\n" + "=" * 78)
 print("3) LIGA CONCRETA -> SOLO SUS PARTIDOS")

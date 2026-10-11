@@ -66,13 +66,28 @@ o doble clic en **`iniciar.bat`**.
      (`/listView/basketball.json`), no 35.
 2. Pulsa **PING AHORA** (o marca **Automático cada N s**, por defecto 5 s).
 3. La tabla se lista con **Liga**, 1Q, 2Q, total, línea, **Pred.**, **Δ** y cuotas
-   Over/Under, y se ordena sola:
-   - **Grupo 0** (fila azul = *oportunidad*): 1Q **y** 2Q acabados y con la línea
-     todavía comparable → ordenado por tamaño de `Δ = predicción − línea`.
-   - **Grupo 1**: señal solo con 1Q, o partido ya en 4º cuarto (entonces la línea
-     de la casa ya se ha reajustado y no es comparable).
-   - **Grupo 2**: sin predicción todavía.
-4. La banda superior muestra siempre **la mayor diferencia** del grupo 0.
+   Over/Under, y va **separada en etapas**, con una **cabecera de sección** antes
+   de cada una, para distinguir de un vistazo lo que ya está en descanso de lo
+   que aún no ha llegado ni al 2º cuarto:
+
+   | Sección | Qué es | ¿Se puede apostar? |
+   |---|---|---|
+   | ⏸ **EN DESCANSO 2Q→3Q** (filas en amarillo) | El partido ha parado tras el 2º cuarto | **Sí — AHORA**, es lo que el bot apuesta |
+   | ▶ **EN 1Q** | Falta que termine el 2º cuarto | No: no hay dos cuartos que sumar |
+   | ▶ **EN 2Q** | Jugando, pronto llega el descanso | No todavía |
+   | … **3Q / 4T / prórroga** | La ventana se cerró | No: la línea ya se ha reajustado |
+   | · **Por jugar o terminado** | Aún no empieza o ya acabó | No |
+
+   Dentro de cada etapa, los partidos se ordenan por tamaño de
+   `Δ = predicción − línea` (los que no tienen predicción van al final).
+   La etapa 0 usa **el mismo criterio que el bot**
+   (`descansos.en_ventana_descanso`), así que la tabla y la ventana de apuesta
+   nunca se contradicen.
+
+4. La banda superior muestra siempre **la mayor diferencia**. Si hay algo en
+   descanso lo anuncia como **"⏱ EN DESCANSO —"**; si no, avisa con qué etapa
+   está y por qué todavía no es comparable (*"aún en 1Q: falta que termine el
+   2Q"*, *"ya en 3Q/4T: la línea de la casa se ha reajustado"*…).
 5. Selecciona un partido: se rellenan solos **1Q**, **2Q** y **línea**, y se calcula
    la predicción con el modelo del desplegable **Modelo**, que por defecto está en
    **AUTO (por liga)** (ver más abajo).
@@ -107,34 +122,60 @@ Fuente de datos: **API-Sports** (`https://v1.basketball.api-sports.io`), token e
 
 `python cobertura_ligas.py --comprobar` comprueba que **cada liga que publica la
 casa** puede apostarse por el bot (sale con código 1 si alguna se queda sin
-modelo, así sirve de test). Hoy: **25 de 25** — 24 con modelo propio y NBA
-Pretemporada con el de la NBA.
+motor, así sirve de test). Hoy: **33 de 33** — 26 con modelo propio y 7 con el
+de otra liga. Total: **44 modelos entrenados con 13.205 partidos**.
+
+> El feed **cambia a lo largo del día**: a mediodía publica 33-34 ligas (muchas
+> femeninas y de segunda división) y por la noche 25. `cobertura_ligas.py` avisa
+> cuando entra una nueva, y `descubrir_ligas.py` (sin argumentos) lee el feed y
+> busca el id de las que falten.
+
+El informe separa cinco casos:
+
+| | Significado | ¿El bot apuesta? |
+|---|---|---|
+| **A** | Con **su** modelo (n ≥ 30 partidos de esa liga) | Sí |
+| **B** | Traducida y con datos en API-Sports, pero sin bajar/entrenar | **No** → `historico.py --ligas <clave> --cubrir 120 --guardar --entrenar` |
+| **B'** | Traducida, pero API-Sports aún no publica sus estadísticas | Sí, con el modelo del Excel |
+| **C** | Sin traducción a API-Sports | Sí, con el modelo del Excel |
+| **D** | Resueltas con el modelo de otra liga (NBA/EUROLIGA) | Sí, y lo avisa |
+| **E** | No son ligas (`wnba_series_markets`) | Se ignoran |
 
 Cómo se llegó ahí:
 
-- **Mapa ampliado** (`historico.LIGAS_API_SPORTS`): se añadieron 7 ligas que
-  estaban en el feed sin traducción a API-Sports — Austria/ÖBL (217),
-  Lituania/LKL (60), Reino Unido/SLB (108), Letonia-Estonia/LEBL (204),
-  Nueva Zelanda/Tauihi (375), Japón/B2 (407) y Portugal/LPB (74). Los ids se
-  hallaron con `descubrir_ligas.py`, que baja el listado completo de
-  API-Sports (1 petición) y busca por nombre.
+- **Mapa ampliado** (`historico.LIGAS_API_SPORTS`): 20 ligas añadidas tras
+  hallarlas con `descubrir_ligas.py`, que baja el listado completo de API-Sports
+  (1 petición) y busca por nombre. Por ejemplo: Austria/ÖBL (217),
+  Austria/ÖBL Femenina (218), Bélgica Femenina (25), Chequia (32), Hungría
+  NB I A (46) y su versión femenina (47), Lituania/LKL (60), México/LNBP (63),
+  Polonia 1 Liga (71), Portugal/LPB (74), Reino Unido/SLB (108) y SLB Women
+  (109), Suecia/Superettan (99), España/Liga Femenina (94), Japón/B2 (407)…
 
-  > El feed **cambia a lo largo del día**: aparecen y desaparecen ligas según
-  > la hora. `cobertura_ligas.py --comprobar` es lo que avisa cuando entra una
-  > nueva, y `descubrir_ligas.py <texto>` halla su id en un minuto.
+  Tres ligas quedan **mapeadas sin poder entrenarse** (B') porque API-Sports aún
+  no les da estadísticas — cuestan **0 peticiones** y se entrenan solas en cuanto
+  las publiquen: Alemania Pro A (42), Alemania DBBL Women (41), Italia A2
+  Women (243, 244) y España/Segunda FEB (96).
+
+  Otras tres **no existen en API-Sports** y se quedan con el respaldo del Excel:
+  `italy/serie_b`, `morocco/division_1` y
+  `club_tournaments/arabian_gulf_club_championship`.
 
 - **Reserva de temporadas** (`historico.descargar_liga(--cubrir N)`): si con las
   temporadas pedidas no llegan las muestras, **sigue bajando temporadas
   anteriores** hasta alcanzar el mínimo o agotarlas. Es lo que permitió entrenar
-  las ligas de temporada reciente:
+  las ligas de temporada reciente (una temporada apenas empezada trae 7-30
+  partidos):
 
-  | Liga | Temporada actual | Temporada anterior | Total |
+  | Liga | Temporada actual | Se bajó la anterior | Total |
   |---|---|---|---|
-  | Lituania / LKL | 18 partidos | +159 | 177 |
-  | Reino Unido / SLB | 17 | +148 | 165 |
-  | Letonia-Estonia / LEBL | 26 | +192 | 218 |
-  | Nueva Zelanda / Tauihi | 7 | +33 +33 +34 | 107 |
-  | Austria / ÖBL | 180 (suficiente) | — | 180 |
+  | Nueva Zelanda / Tauihi | 7 partidos | +33 +33 +34 | 107 |
+  | Reino Unido / SLB Women | 9 | +94 +115 | 218 |
+  | Austria / ÖBL Femenina | 11 | +69 +46 | 126 |
+  | Bélgica Femenina | 12 | +146 | 158 |
+  | Polonia / 1 Liga | 28 | +294 | 322 |
+  | Lituania / LKL | 18 | +159 | 177 |
+  | Portugal / LPB | 9 | +147 | 156 |
+  | México / LNBP | 188 (suficiente) | — | 188 |
 
 - **`wnba_series_markets` no es una liga** (son mercados de series): pasa a
   `historico.NO_SON_LIGAS` y se ignora en lugar de buscarle un id inexistente.

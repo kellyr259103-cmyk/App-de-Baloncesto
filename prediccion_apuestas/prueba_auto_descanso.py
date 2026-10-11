@@ -72,7 +72,11 @@ v.var_stake.set("10000")
 v._ventanas.clear()
 v._apuestas_auto.clear()
 antes = base_datos.estadisticas_bd()["apuestas"]
-print(f"   AUTO activado, umbral=3.0, stake=10000. apuestas en BD: {antes}")
+# instantánea de lo que ya había: la app puede estar apostando a la vez y hay
+# que dejar sus apuestas intactas al final
+previas = {ap.id for ap in base_datos.listar_apuestas()}
+print(f"   AUTO activado, umbral=3.0, stake=10000. apuestas en BD: {antes} "
+      f"(de ellas, {len(previas)} ajenas)")
 
 # --- elegir una liga que SÍ tenga modelo ---
 liga_con_modelo = sorted(a.modelos_ligas)[0]
@@ -215,10 +219,13 @@ minutos, n_desc = medidos[liga_con_modelo]
 assert 8.0 < minutos < 10.0, minutos
 
 print("\n" + "=" * 72)
-print("9) LIMPIEZA")
+print("9) LIMPIEZA (solo las apuestas de ESTA prueba)")
 print("=" * 72)
-for ap in base_datos.listar_apuestas():
+mias = [ap for ap in base_datos.listar_apuestas() if ap.id not in previas]
+for ap in mias:
     base_datos.eliminar_apuesta(ap.id)
+print(f"   borradas {len(mias)} · "
+      f"quedan {base_datos.estadisticas_bd()['apuestas']} (las ajenas)")
 conn = base_datos.conectar()
 with conn:
     with conn.cursor() as cur:

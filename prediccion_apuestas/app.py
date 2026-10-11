@@ -45,6 +45,8 @@ C_ROJO_BG = "#FFC7CE"
 C_ROJO_FG = "#C00000"
 C_AZUL = "#1F4E79"
 C_AZUL_CLARO = "#DDEBF7"
+C_DESCANSO_BG = "#FFF2CC"    # filas en el descanso 2Q→3Q (apostables ya)
+C_GRUPO_BG = "#E7E6E6"       # cabeceras de sección de la tabla
 
 F_TITULO = ("Calibri", 15, "bold")
 F_SUB = ("Calibri", 9, "italic")
@@ -466,6 +468,10 @@ class PestanaVivo(ttk.Frame):
         except tk.TclError:
             pass
         self.tree.tag_configure("oportunidad", background=C_AZUL_CLARO)
+        # filas en el descanso (las únicas apostables AHORA) y cabeceras
+        self.tree.tag_configure("descanso", background=C_DESCANSO_BG)
+        self.tree.tag_configure("etapa", background=C_GRUPO_BG,
+                                foreground=C_AZUL)
 
         # --- flujo de predicción ---
         flujo = tk.LabelFrame(self, text=" FLUJO: activar predicción con 1Q + 2Q ",
@@ -716,22 +722,55 @@ class PestanaVivo(ttk.Frame):
                     break
             self.calcular_flujo()
 
+    # Cabeceras de sección de la tabla, en el MISMO orden que devuelve
+    # `grupo_fila`. Una por grupo, para separar de un vistazo lo que ya está
+    # en descanso de lo que aún no ha llegado ni al 2Q.
+    ETAPAS = (
+        "⏸  EN DESCANSO 2Q→3Q · el bot puede apostar YA",
+        "▶  EN 1Q · falta que termine el 2º cuarto",
+        "▶  EN 2Q · jugando, pronto es el descanso",
+        "…  3Q / 4T / prórroga · ventana cerrada, la línea ya cambió",
+        "·  Por jugar o terminado",
+    )
+
+    # Por qué el partido de esa etapa NO se puede comparar todavía
+    PIES = {
+        0: "",
+        1: " (aún en 1Q: falta que termine el 2Q)",
+        2: " (aún en el 2Q: todavía no es el descanso)",
+        3: " (ya en 3Q/4T: la línea de la casa se ha reajustado)",
+        4: " (por jugar o terminado)",
+    }
+
     @staticmethod
     def grupo_fila(p, res) -> int:
         """
-        Grupo de ordenación de una fila:
+        Etapa del partido: decide el ORDEN y las CABECERAS DE SECCIÓN de la
+        tabla de EN VIVO.
 
-        0 -> señal COMPLETA (1Q y 2Q finales) y con línea todavía comparable
-             con la predicción: es el grupo del que salen las oportunidades
-        1 -> señal parcial (solo el 1Q está acabado) o ya en 4º cuarto, donde
-             la línea de la casa se ha reajustado: se listan, pero no mandan
-        2 -> sin predicción todavía
+        0 -> **en el descanso 2Q→3Q**: la ventana está abierta, así que es el
+             único grupo que el bot puede apostar AHORA. Va primero.
+        1 -> **en el 1Q**: el 2Q ni siquiera ha terminado, no hay dos cuartos
+             que sumar, así que no hay predicción posible.
+        2 -> **en el 2Q**: jugando, le queda poco al descanso.
+        3 -> ya en **3Q o después**: la ventana se cerró y la línea de la casa
+             se ha reajustado, por lo que la predicción 1Q+2Q ya no es
+             comparable con ella.
+        4 -> por jugar o terminado.
+
+        Se usa `descansos.en_ventana_descanso` (el MISMO criterio que el bot)
+        y no `p.en_descanso_2q`, para que la sección de la tabla y la ventana
+        de apuesta nunca se contradigan.
         """
-        if res is None:
-            return 2
-        if p.en_ultimo_periodo or not p.q2_completo:
+        if p.finalizado or p.es_pretemporada:
+            return 4
+        if descansos.en_ventana_descanso(p):
+            return 0
+        if p.q2_completo:
+            return 3
+        if (p.period_id or "").upper() in ("", "QUARTER1", "PERIOD1"):
             return 1
-        return 0
+        return 2
 
     def _poblar_tabla(self) -> None:
         seleccion = self.tree.selection()
@@ -779,16 +818,20 @@ class PestanaVivo(ttk.Frame):
                 f1(p.cuota_under) if p.cuota_under else "—",
                 mercado,
             )
-            # orden: (0) predecibles con línea todavía comparable, por |Δ|
-            # descendente; (1) los que ya van en 4º cuarto; (2) el resto
+            # orden por ETAPA (0 = en descanso, el único apostable ahora) y,
+            # dentro de cada etapa, por |Δ| descendente
             grupo = self.grupo_fila(p, res)
             clave_orden = (grupo, -abs(res.diferencia) if res else 0.0)
-            tag = "oportunidad" if (grupo == 0 and abs(res.diferencia) >= 5) else "normal"
+            if grupo == 0:
+                tag = "descanso"            # resaltado: apostable YA
+            elif res is not None and abs(res.diferencia) >= 5:
+                tag = "oportunidad"
+            else:
+                tag = "normal"
             filas.append((clave_orden, str(p.evento_id), valores, tag, res, p))
 
         filas.sort(key=lambda f: f[0])
-        for _orden, iid, valores, tag, _res, _p in filas:
-            self.tree.insert("", "end", iid=iid, values=valores, tags=(tag,))
+        self._insertar_con_secciones(filas)
 
         if seleccion:
             try:
@@ -797,6 +840,30 @@ class PestanaVivo(ttk.Frame):
                 pass
 
         self._mostrar_mejor_oportunidad(filas)
+
+    def _insertar_con_secciones(self, filas) -> None:
+        """
+        Rellena la tabla metiendo una CABECERA antes de cada etapa.
+
+        Así se separan de un vistazo los partidos **ya en descanso** (los que
+        el bot puede apostar ahora) de los que **aún siguen en el 1Q**, en el
+        2Q o en tramos posteriores, sin obligar a mirar columna por columna.
+
+        Las cabeceras llevan iids `__etapa_N`, que `_al_seleccionar` ignora
+        porque no son números: pulsarlas no cambia el partido seleccionado.
+        """
+        cuenta: Counter = Counter(orden[0] for orden, *_ in filas)
+        visto: set = set()
+        for orden, iid, valores, tag, _res, _p in filas:
+            grupo = orden[0]
+            if grupo not in visto:
+                visto.add(grupo)
+                titulo = f"{self.ETAPAS[grupo]}   ({cuenta[grupo]})"
+                self.tree.insert(
+                    "", "end", iid=f"__etapa_{grupo}",
+                    values=(titulo,) + ("",) * (len(self.COLUMNAS) - 1),
+                    tags=("etapa",))
+            self.tree.insert("", "end", iid=iid, values=valores, tags=(tag,))
 
     def recolectar_en_hilo(self, partidos) -> None:
         """
@@ -836,26 +903,29 @@ class PestanaVivo(ttk.Frame):
         if not filas:
             self.lbl_oportunidad.config(text="Sin partidos.", fg=C_SUB_FG)
             return
-        con_datos = [f for f in filas if f[4] is not None]
+        # solo partidos EN JUEGO (etapa < 4): los terminados tienen todos sus
+        # cuartos y meterían en el banner un partido que ya no se puede jugar
+        con_datos = [f for f in filas if f[4] is not None and f[0][0] < 4]
         if not con_datos:
             vivos = sum(1 for p in self.partidos if p.es_vivo)
             self.lbl_oportunidad.config(
                 text=f"{len(self.partidos)} partidos · {vivos} en vivo. "
-                     f"Ninguno tiene todavía 1Q + 2Q completos con línea.",
+                     f"Ninguno en juego tiene todavía 1Q + 2Q completos con línea.",
                 fg=C_SUB_FG)
             return
-        comparables = [f for f in con_datos if f[0][0] == 0]
-        pie = ""
-        if not comparables:
-            # no hay ninguna señal completa: se enseña la mejor parcial,
-            # pero advirtiendo de por qué no es comparable
-            comparables = con_datos
-            pie = (" (solo con 1Q: el 2Q aún no ha terminado)"
-                   if not comparables[0][5].q2_completo else
-                   " (4º cuarto: la línea ya se ha reajustado)")
-        _orden, _iid, _v, _tag, res, p = comparables[0]
+        # si alguno está EN DESCANSO manda ese, que es el único apostable ya;
+        # si no, el mejor de la etapa más avanzada y se explica por qué falta
+        en_descanso = [f for f in con_datos if f[0][0] == 0]
+        if en_descanso:
+            elegido, pie = en_descanso[0], ""
+            cabecera = "⏱ EN DESCANSO — "
+        else:
+            elegido = con_datos[0]        # `filas` ya viene ordenado por etapa
+            pie = self.PIES.get(elegido[0][0], "")
+            cabecera = "Mayor diferencia: "
+        _orden, _iid, _v, _tag, res, p = elegido
         self.lbl_oportunidad.config(
-            text=(f"Mayor diferencia: {p.liga_nombre} · {p.nombre} — "
+            text=(f"{cabecera}{p.liga_nombre} · {p.nombre} — "
                   f"1Q {p.q1} + 2Q {p.q2}, predicción {f1(res.prediccion)} vs "
                   f"línea {f1(p.linea)} → {res.veredicto} {res.diferencia:+.1f} pts "
                   f"(P(over) {res.prob_over * 100:.0f}%){pie}"),

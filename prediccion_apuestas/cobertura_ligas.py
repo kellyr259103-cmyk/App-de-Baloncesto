@@ -55,20 +55,26 @@ def main() -> int:
     except historico.ErrorHistorico as exc:
         print(f"   (no se pudo consultar: {exc})")
 
-    a, b, c, no_liga = [], [], [], []
+    a, b, sin_cobertura, c, no_liga = [], [], [], [], []
     for clave in sorted(vivas):
         if clave in historico.NO_SON_LIGAS:
             no_liga.append(clave)
             continue
         n_muestras = muestras.get(clave, 0)
-        tiene_modelo = clave in entrenados
-        if tiene_modelo:
+        if clave in entrenados:
             a.append((clave, vivas[clave], entrenados[clave]))
-        elif clave in mapeadas:
-            b.append((clave, vivas[clave], n_muestras,
-                      [inv.get(i, []) for i in mapeadas[clave]]))
-        else:
-            c.append((clave, vivas[clave], n_muestras))
+            continue
+        if clave in mapeadas:
+            temps = [inv.get(i, []) for i in mapeadas[clave]]
+            if any(temps):
+                # traducida y CON datos: basta con bajarla y reentrenar
+                b.append((clave, vivas[clave], n_muestras, temps))
+            else:
+                # traducida pero API-Sports aún no publica sus estadísticas:
+                # no se puede entrenar (cuesta 0 peticiones) y va con el respaldo
+                sin_cobertura.append((clave, vivas[clave], n_muestras))
+            continue
+        c.append((clave, vivas[clave], n_muestras))
 
     print("\n" + "=" * 78)
     print(f"A) CON MODELO PROPIO — el bot apuesta ya ({len(a)})")
@@ -78,8 +84,10 @@ def main() -> int:
               f"RMSE test={m.rmse_test_dos:5.1f}  [{nombre[:22]}]")
 
     print("\n" + "=" * 78)
-    print(f"B) TRADUCIDAS PERO SIN MODELO — sobran muestras o falta entrenar ({len(b)})")
+    print(f"B) TRADUCIDAS Y CON DATOS PERO SIN MODELO — falta bajar/entrenar ({len(b)})")
     print("=" * 78)
+    if not b:
+        print("   ninguna: todas las traducidas ya tienen modelo")
     for clave, nombre, n, temps in b:
         ids = mapeadas[clave]
         print(f"   {clave:38s} muestras={n:4d} (min {UMBRAL_MUESTRAS})  [{nombre[:22]}]")
@@ -91,6 +99,18 @@ def main() -> int:
                 print(f"       id {lid}: SIN temporadas con datos")
 
     print("\n" + "=" * 78)
+    print(f"B') SIN COBERTURA EN API-SPORTS — mapeadas pero sin estadísticas ({len(sin_cobertura)})")
+    print("=" * 78)
+    if sin_cobertura:
+        for clave, nombre, n in sin_cobertura:
+            ids = ", ".join(str(i) for i in mapeadas[clave])
+            print(f"   {clave:38s} id {ids:12s} muestras={n:4d}  [{nombre[:22]}]")
+        print("\n   no se pueden entrenar hasta que API-Sports publique sus")
+        print("   estadísticas; el bot las apuesta igual con el modelo del Excel")
+    else:
+        print("   ninguna: todas las traducidas tienen estadísticas")
+
+    print("\n" + "=" * 78)
     print(f"C) SIN TRADUCCIÓN A API-SPORTS — aún sin modelo ({len(c)})")
     print("=" * 78)
     if c:
@@ -100,15 +120,16 @@ def main() -> int:
     else:
         print("   ninguna: todas las ligas del feed tienen traducción")
 
-    # las que no tienen traducción siguen siendo apostables si el modelo de
+    # las que no tienen modelo propio siguen siendo apostables si el de
     # respaldo está entrenado — igual que hace la app en `modelo_para_partido`
     _clave_excel = {"NBA": "nba", "EUROLIGA": "euroleague"}
     c_resueltas = []
-    for clave, nombre, _n in c:
+    for clave, nombre, _n in c + sin_cobertura:
         base = "NBA" if ("nba" in clave or "wnba" in clave) else "EUROLIGA"
         k = _clave_excel.get(base, base)      # la app usa el del Excel
         if k in entrenados and entrenados[k].n:
             c_resueltas.append((clave, nombre, base, entrenados[k].n))
+    cubiertas = {r[0] for r in c_resueltas}
 
     # --- las que no son liga, ni las que van con el modelo de otra ---
     print("\n" + "=" * 78)
@@ -130,11 +151,12 @@ def main() -> int:
     print("\n" + "=" * 78)
     print("DIAGNÓSTICO")
     print("=" * 78)
-    print(f"   A: {len(a):3d} ligas con SU modelo")
-    print(f"   D: {len(c_resueltas):3d} con el de otra liga (fallback)")
-    print(f"   B: {len(b):3d} traducidas pero sin modelo → reentrenar")
-    print(f"   C: {len(c):3d} sin traducción → añadir su id")
-    print(f"   E: {len(no_liga):3d} no son ligas")
+    print(f"   A:  {len(a):3d} ligas con SU modelo")
+    print(f"   D:  {len(c_resueltas):3d} con el de otra liga (respaldo)")
+    print(f"   B:  {len(b):3d} traducidas con datos → bajar y entrenar")
+    print(f"   B': {len(sin_cobertura):3d} sin estadísticas en API-Sports → respaldo")
+    print(f"   C:  {len(c):3d} sin traducción → añadir su id")
+    print(f"   E:  {len(no_liga):3d} no son ligas")
     total_apostables = len(a) + len(c_resueltas)
     print(f"\n   ligas apostables por el bot: {total_apostables} de "
           f"{len(vivas) - len(no_liga)}")
@@ -148,20 +170,21 @@ def main() -> int:
 
     # --- modo test: exit 1 si alguna liga del feed se queda sin motor ---
     if "--comprobar" in sys.argv:
-        cubiertas = {r[0] for r in c_resueltas}
-        rotas = [f"{clave} ({n} muestras)" for clave, n in muestras.items()
-                 if clave in vivas and clave not in entrenados
-                 and clave not in cubiertas and clave not in historico.NO_SON_LIGAS]
-        rotas += [clave for clave, _nombre, _n in c if clave not in cubiertas]
-        if b or rotas:
+        rotas = [f"{clave} (sin modelo ni respaldo)"
+                 for clave, _nombre, _n in c if clave not in cubiertas]
+        sin_entrenar = [f"{clave} ({n} muestras, traducida con datos)"
+                        for clave, _n, n, _t in b]
+        if rotas or sin_entrenar:
             print("\nCOMPROBACIÓN: FALLA — ligas del feed sin motor:")
-            for clave, _n, nmuestras in b:
-                print(f"   {clave} (traducida, {nmuestras} muestras)")
+            for r in sin_entrenar:
+                print(f"   {r}")
             for r in sorted(set(rotas)):
                 print(f"   {r}")
+            print("\n   → bajar/entrenar: python historico.py --ligas <clave> "
+                  "--cubrir 120 --guardar --entrenar")
             return 1
         print(f"\nCOMPROBACIÓN: OK — las {total_apostables} ligas del feed "
-              f"tienen motor (el bot puede apostarlas)")
+              f"tienen motor ({len(a)} propios + {len(c_resueltas)} de respaldo)")
         return 0
     return 0
 
