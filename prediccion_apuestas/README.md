@@ -100,10 +100,45 @@ Cada liga tiene su propio modelo MCO entrenado con **sus** partidos reales:
   si prefieres forzar un modelo concreto).
 
 Fuente de datos: **API-Sports** (`https://v1.basketball.api-sports.io`), token en
-`config.json → api_sports.token` (o variable `API_SPORTS_TOKEN`). Trae **29 de las
-35 ligas** de BetPlay con sus cuartos, en **una petición por liga** (Euroliga 2025:
-385 partidos, NBA 2025-26: 1315, ACB: 332, Chile: 334, Portugal: 30+…). Cuota:
+`config.json → api_sports.token` (o variable `API_SPORTS_TOKEN`). Cuota:
 300 peticiones/día; una descarga completa cuesta ~65.
+
+#### 4.1 Cobertura total — **todas las ligas del feed tienen motor**
+
+`python cobertura_ligas.py --comprobar` comprueba que **cada liga que publica la
+casa** puede apostarse por el bot (sale con código 1 si alguna se queda sin
+modelo, así sirve de test). Hoy: **24 de 24**.
+
+Cómo se llegó ahí:
+
+- **Mapa ampliado** (`historico.LIGAS_API_SPORTS`): se añadieron 5 ligas que
+  estaban en el feed sin traducción a API-Sports — Austria/ÖBL (id 217),
+  Lituania/LKL (60), Reino Unido/SLB (108), Letonia-Estonia/LEBL (204) y
+  Nueva Zelanda/Tauihi (375). Los ids se hallaron con
+  `descubrir_ligas.py`, que baja el listado completo de API-Sports (1 petición)
+  y busca por nombre.
+
+- **Reserva de temporadas** (`historico.descargar_liga(--cubrir N)`): si con las
+  temporadas pedidas no llegan las muestras, **sigue bajando temporadas
+  anteriores** hasta alcanzar el mínimo o agotarlas. Es lo que permitió entrenar
+  las ligas de temporada reciente:
+
+  | Liga | Temporada actual | Temporada anterior | Total |
+  |---|---|---|---|
+  | Lituania / LKL | 18 partidos | +159 | 177 |
+  | Reino Unido / SLB | 17 | +148 | 165 |
+  | Letonia-Estonia / LEBL | 26 | +192 | 218 |
+  | Nueva Zelanda / Tauihi | 7 | +33 +33 +34 | 107 |
+  | Austria / ÖBL | 180 (suficiente) | — | 180 |
+
+- **`wnba_series_markets` no es una liga** (son mercados de series): pasa a
+  `historico.NO_SON_LIGAS` y se ignora en lugar de buscarle un id inexistente.
+
+- **NBA Pretemporada no tiene liga propia en API-Sports** (se usa el id 12 de la
+  NBA, que mezcla pretemporada y temporada regular). Se resuelve con el **modelo
+  de respaldo NBA** (n=1340), igual que ya hacía la interfaz — y ahora también
+  el bot automático (ver 6.2).
+
 
 **Guardas del mercado** (los mercados no abiertos no se pueden apostar):
 
@@ -209,6 +244,7 @@ Lo que destapó, ya corregido:
 | Estado del Under | El parsing solo comprobaba el estado del outcome **Over**. | Se comprueban los **dos** outcomes y el `suspended` de la oferta. |
 | Motivo invisible | Todos los `continue` eran silenciosos: el panel decía *"esperando Δ"* aunque la causa fuera "sin modelo" o "mercado cerrado". | Cada motivo se cuenta y se enseña: *"No aposté por: 1× OVER SUSPENDIDO por la casa"*. |
 | Cuotas ignoradas | Se apuesta por `|Δ| ≥ umbral` sin mirar la cuota. Con el ~8% de margen de la casa, un Δ pequeño es **-EV**. | Puerta de **EV mínimo** (`EV = P × cuota − 1`), por defecto 0 %, configurable junto al umbral. |
+| Bot ≠ interfaz | El bot miraba `modelos_ligas[clave]` directamente: una liga sin modelo propio (p. ej. NBA Pretemporada) **no se apostaba**, aunque la propia pantalla mostrara VEREDICTO con el modelo del Excel. | Usa `modelo_para_partido()`, el mismo resolvedor que la interfaz: modelo propio o el del Excel (NBA/EUROLIGA). La apuesta guarda en su `nota` qué modelo se usó. |
 
 Lo que descartó la auditoría (por si se retoman):
 
@@ -360,6 +396,9 @@ python prueba_auto_descanso.py  # circuito automático: descanso → apuesta sol
 python prueba_automatico.py     # arranque solo (AUTO + 5 s) + ventana responsive
 python prueba_disponibilidad.py # la casa no tiene el lado disponible / EV negativo
 python auditoria_auto.py        # auditoría real: motivos, mercados y valor esperado
+python cobertura_ligas.py       # qué ligas del feed tienen motor (A/B/C/D/E)
+python cobertura_ligas.py --comprobar   # test: exit 1 si alguna liga se queda sin modelo
+python descubrir_ligas.py       # halla el id de API-Sports de una liga que falta
 ```
 
 Las de GUI (`prueba_bd.py`, `prueba_gui.py`, `prueba_gui_ligas.py`,

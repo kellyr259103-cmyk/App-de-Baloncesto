@@ -178,5 +178,43 @@ print(f"   nota: {regs[0].nota!r}")
 assert "EV=" in regs[0].nota, "la nota debe llevar el valor esperado"
 base_datos.eliminar_apuesta(regs[0].id)
 
+print("\n" + "=" * 72)
+print("6) APUESTA AUNQUE LA LIGA NO TENGA MODELO PROPIO (respaldo NBA)")
+print("=" * 72)
+# REGRESIÓN: el bot miraba `modelos_ligas[clave]` directamente y se negaba a
+# apostar aunque la propia interfaz enseñara VEREDICTO con el modelo del
+# Excel (p. ej. nba_preseason, que cae al de la NBA con n=1340).
+v._motivos_auto.clear()
+v._apuestas_auto.clear()
+v._ventanas.clear()
+v.var_ev_min.set(-20.0)
+
+p_fb = partido_en_descanso(910004, q1, q2, 150.0, "nba_prueba_fallback",
+                           "Liga sin modelo propio",
+                           cuota_over=1.90, cuota_under=1.90,
+                           over_abierta=True, under_abierta=True)
+mfb, etq = a.modelo_para_partido(p_fb, "AUTO")
+print(f"   liga '{p_fb.clave_liga}' no está en modelos_ligas: "
+      f"{p_fb.clave_liga not in a.modelos_ligas}")
+assert p_fb.clave_liga not in a.modelos_ligas, "la liga debe ser nueva"
+print(f"   modelo que usa: {mfb.liga} (n={mfb.n}) · {etq}")
+assert mfb.n > 0, "el respaldo debe estar entrenado"
+# línea puesta 10 pts por debajo de la predicción: asegura |Δ| grande
+p_fb.linea = round(mfb.predecir_dos(float(q1), float(q2)) - 10.0, 1)
+
+v._auto_apostar_en_descanso([p_fb])
+a.update()
+print(f"   motivo recogido: {dict(v._motivos_auto)}")
+assert 910004 in v._apuestas_auto, (
+    f"debería haber apostado con el modelo de respaldo; motivos: "
+    f"{dict(v._motivos_auto)}")
+regs = [r for r in base_datos.listar_apuestas() if r.evento_id == 910004]
+assert regs, "debe quedar registrada en PostgreSQL"
+print(f"   liga_modelo guardada: {regs[0].liga_modelo!r}")
+print(f"   nota: {regs[0].nota!r}")
+assert "modelo" in regs[0].nota, "la nota debe avisar de qué modelo se usó"
+assert regs[0].liga_modelo == mfb.liga, "debe guardar la liga del modelo usado"
+base_datos.eliminar_apuesta(regs[0].id)
+
 a.destroy()
 print("\nPRUEBA DE DISPONIBILIDAD OK")

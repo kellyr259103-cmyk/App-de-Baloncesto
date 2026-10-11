@@ -67,8 +67,12 @@ LIGAS_API_SPORTS: dict[str, tuple[int, ...]] = {
     "aba_league": (198,),                  # ABA League / Europe
     "bnxt_league": (368,),                 # BNXT League / Europe
     "club_friendly_matches": (205,),       # Friendly International / World
+    # Añadidas el 10-10-2026 para que TODAS las ligas del feed tengan modelo
+    # (verificado con descubrir_ligas.py: id + temporadas con datos).
+    "latvian-estonian_league": (204,),     # LEBL (Letonia+Estonia) / Europe
     # --- con región ---
     "argentina/lnb": (18,),                # Liga A / Argentina
+    "austria/obl": (217,),                 # Superliga (antes ÖBL) / Austria
     "australia/nbl": (1,),                 # NBL / Australia
     "belgium/top_division_1": (374,),      # Pro Basketball League / Belgium
     "bulgaria/nbl": (113,),                # NBL / Bulgaria
@@ -79,6 +83,8 @@ LIGAS_API_SPORTS: dict[str, tuple[int, ...]] = {
     "italy/lega_a": (52,),                 # Lega A / Italy
     "italy/serie_a2": (242,),              # Serie A2 / Italy
     "japan/b1__league": (56,),             # B League / Japan
+    "lithuania/lkl": (60,),                # LKL / Lithuania
+    "new_zealand/tauihi_basketball_aotearoa__w_": (375,),   # Tauihi W / Nueva Zelanda
     "philippines/pba": (151, 152, 153,),   # Philippine/Governors/Commissioners Cup
     "poland/plk": (72,),                   # Energa Basket Liga / Poland
     "portugal/campeonato_nacional_2": (261,),   # Proliga / Portugal
@@ -90,7 +96,13 @@ LIGAS_API_SPORTS: dict[str, tuple[int, ...]] = {
     "spain/liga_acb": (117,),              # ACB / Spain
     "turkey/super_league": (104,),         # Basketbol Süper Ligi / Turkey
     "turkey/tbl": (102,),                  # TBL (2ª división) / Turkey
+    "united_kingdom/super_league_basketball": (108,),   # SLB / Reino Unido
 }
+
+# Claves que publica la casa pero que NO son ligas: son mercados de series
+# (p. ej. "¿quién gana la serie?"). No se pueden entrenar ni apostar como un
+# partido, así que se ignoran a propósito en vez de buscarles un id.
+NO_SON_LIGAS = ("wnba_series_markets",)
 
 ESTADOS_FINALIZADO = ("FT", "AET")     # finished / finished after overtime
 
@@ -276,35 +288,62 @@ def _parsear_partidos(d: dict, clave: str, etiqueta) -> list[Muestra]:
 def descargar_liga(clave: str, ids: Iterable[int],
                    cliente: Optional[_Cliente] = None,
                    n_temporadas: int = 2,
-                   al_avanzar: Optional[Callable] = None) -> list[Muestra]:
+                   al_avanzar: Optional[Callable] = None,
+                   minimo_muestras: int = 0) -> list[Muestra]:
     """
     Descarga una liga de BetPlay desde API-Sports.
 
     `clave` es la clave única de BetPlay ('nba', 'spain/liga_acb') y `ids` los
     ids de esa liga en API-Sports (varios cuando la liga se divide en copas,
     como la PBA). Por defecto las dos temporadas más recientes con datos.
+
+    RESERVA DE TEMPORADAS: si con esas aún no hay `minimo_muestras`, sigue
+    bajando TEMPORADAS ANTERIORES (la más nueva primero) hasta alcanzar el
+    mínimo o agotar las disponibles. Así una liga recién creada —p. ej. la SLB
+    del Reino Unido, que solo empezó en 2023— usa el histórico de cursos
+    anteriores en vez de quedarse sin modelo.
     """
     cliente = cliente or _Cliente()
     inv = cliente.inventario()
-    salen: list[Muestra] = []
+
+    # (etiqueta, id) de TODAS las temporadas con datos, de más nueva a más vieja
+    pares: list[tuple] = []
     for lid in ids:
-        etiquetas = inv.get(lid, [])[:max(1, n_temporadas)]
-        if not etiquetas:
-            if al_avanzar:
-                al_avanzar(clave, f"id {lid} sin temporadas con datos")
-            continue
-        for etiqueta in etiquetas:
-            d = cliente.get("games", league=lid, season=etiqueta)
-            lote = _parsear_partidos(d, clave, etiqueta)
-            salen.extend(lote)
-            if al_avanzar:
-                al_avanzar(f"{clave} ({etiqueta})", len(lote))
+        for etiqueta in inv.get(lid, []):
+            pares.append((etiqueta, lid))
+    pares.sort(key=lambda t: _anio_temporada(t[0]), reverse=True)
+
+    if not pares:
+        if al_avanzar:
+            al_avanzar(clave, "ningún id con temporadas con datos en API-Sports")
+        return []
+
+    # primeras `n_temporadas` por id; el resto se guarda por si hacen falta
+    limite = max(1, n_temporadas)
+    vistos: dict[int, int] = {}
+    primeras: list[tuple] = []
+    resto: list[tuple] = []
+    for etiqueta, lid in pares:
+        vistos[lid] = vistos.get(lid, 0) + 1
+        (primeras if vistos[lid] <= limite else resto).append((etiqueta, lid))
+
+    salen: list[Muestra] = []
+    plan = primeras if minimo_muestras <= 0 else primeras + resto
+    for etiqueta, lid in plan:
+        if minimo_muestras and len(salen) >= minimo_muestras:
+            break               # ya hay historial suficiente: no gastar cuota
+        d = cliente.get("games", league=lid, season=etiqueta)
+        lote = _parsear_partidos(d, clave, etiqueta)
+        salen.extend(lote)
+        if al_avanzar:
+            al_avanzar(f"{clave} ({etiqueta})", len(lote))
     return salen
 
 
 def descargartodo(ligas: Optional[Iterable[str]] = None,
                   n_temporadas: int = 2,
-                  al_avanzar: Optional[Callable] = None) -> list[Muestra]:
+                  al_avanzar: Optional[Callable] = None,
+                  minimo_muestras: int = 0) -> list[Muestra]:
     """Descarga todas las ligas del mapa (o solo las pedidas)."""
     cliente = _Cliente()
     pedidas = list(ligas) if ligas else list(LIGAS_API_SPORTS)
@@ -317,7 +356,8 @@ def descargartodo(ligas: Optional[Iterable[str]] = None,
     for clave in pedidas:
         try:
             salen.extend(descargar_liga(clave, LIGAS_API_SPORTS[clave], cliente,
-                                        n_temporadas, al_avanzar))
+                                        n_temporadas, al_avanzar,
+                                        minimo_muestras))
         except ErrorHistorico as exc:
             if al_avanzar:
                 al_avanzar(clave, f"ERROR: {exc}")
@@ -347,6 +387,10 @@ def main() -> int:
                    help="claves de BetPlay (nba, spain/liga_acb, ...)")
     p.add_argument("--temporadas", type=int, default=2,
                    help="temporadas más recientes por liga (por defecto 2)")
+    p.add_argument("--cubrir", type=int, default=0,
+                   help="si con las temporadas pedidas no llegan las muestras, "
+                        "sigue bajando temporadas ANTERIORES hasta alcanzar "
+                        "este mínimo (0 = no reservar)")
     p.add_argument("--guardar", action="store_true",
                    help="guarda las muestras en PostgreSQL")
     p.add_argument("--entrenar", action="store_true",
@@ -359,8 +403,10 @@ def main() -> int:
         extra = "" if n is None else f" → {n} partidos"
         print(f"   {que}{extra}", flush=True)
 
-    print(f"Descargando de API-Sports (temporadas: {args.temporadas})…")
-    muestras = descargartodo(args.ligas, args.temporadas, avance)
+    print(f"Descargando de API-Sports (temporadas: {args.temporadas}"
+          + (f", reserva hasta {args.cubrir} muestras" if args.cubrir else "")
+          + ")…")
+    muestras = descargartodo(args.ligas, args.temporadas, avance, args.cubrir)
     print(f"\nMuestras descargadas: {len(muestras)}")
     for liga, n in resumen_muestras(muestras).items():
         print(f"   {liga:38s} {n:5d}")

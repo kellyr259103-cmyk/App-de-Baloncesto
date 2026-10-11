@@ -999,11 +999,17 @@ class PestanaVivo(ttk.Frame):
                 continue
             if p.evento_id in self._apuestas_auto:
                 continue            # ya apostado en este partido
-            # solo la liga del partido (AUTO por liga)
-            modelo = self.app.modelos_ligas.get(p.clave_liga)
+            # MISMO modelo que muestra la interfaz (`_modelo_de`): el de la
+            # propia liga o, si esa liga aún no tiene suficientes partidos,
+            # el del Excel (NBA/EUROLIGA). Antes se miraba solo
+            # `modelos_ligas[clave]` y el bot se negaba a apostar lo que la
+            # propia pantalla estaba enseñando como VEREDICTO (p. ej.
+            # nba_preseason, que cae al modelo de la NBA con n=1380).
+            modelo, etiqueta = self.app.modelo_para_partido(p, "AUTO")
             if modelo is None or not modelo.n:
-                motivos["sin modelo para esa liga"] += 1
+                motivos["sin modelo usable (ni de la liga ni del Excel)"] += 1
                 continue
+            es_fallback = "sin datos de" in etiqueta
 
             res = predecir(modelo, float(p.q1),
                            None if not p.q2_completo else float(p.q2),
@@ -1059,7 +1065,9 @@ class PestanaVivo(ttk.Frame):
                 estado=paperbet.ESTADO_PENDIENTE,
                 nota=(f"AUTO descanso2Q ({p.clave_liga}): "
                       f"1Q={p.q1:.0f} 2Q={p.q2:.0f} Δ={res.diferencia:+.1f} "
-                      f"EV={esperado * 100:+.1f}%"),
+                      f"EV={esperado * 100:+.1f}%"
+                      # deja constancia de si se usó el modelo de otra liga
+                      + (f" · ⚠ modelo {etiqueta}" if es_fallback else "")),
             )
             error = paperbet.validar(apuesta)
             if error:
