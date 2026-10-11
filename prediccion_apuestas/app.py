@@ -100,38 +100,57 @@ class Pestana(ttk.Frame):
         self._construir()
 
     def _construir(self) -> None:
-        self.lbl_titulo = tk.Label(
-            self, text="EUROLIGA 2025-26" if self.liga == "EUROLIGA" else "NBA 2025-26",
+        # El contenido va dentro de un canvas con barra vertical. Así, en
+        # monitores bajos la pestaña nunca desborda la pantalla (se desplaza)
+        # y en monitores altos la barra ni se ve y el hueco sobrante queda
+        # vacío, sin estirar las filas.
+        self._canvas = tk.Canvas(self, highlightthickness=0, bd=0)
+        self._vsb = ttk.Scrollbar(self, orient="vertical", command=self._canvas.yview)
+        self._canvas.configure(yscrollcommand=self._vsb.set)
+        self._vsb_visible = False
+        self._panel = tk.Frame(self._canvas)
+        self._ventana_canvas = self._canvas.create_window(
+            (0, 0), window=self._panel, anchor="nw")
+        self._panel.bind("<Configure>", self._panel_configurado)
+        self._canvas.bind("<Configure>", self._canvas_configurado)
+        self._canvas.bind("<Enter>", self._rueda_on)
+        self._canvas.bind("<Leave>", self._rueda_off)
+        self._canvas.pack(side="left", fill="both", expand=True)
+
+        p = self._panel
+        p.lbl_titulo = tk.Label(
+            p, text="EUROLIGA 2025-26" if self.liga == "EUROLIGA" else "NBA 2025-26",
             bg=C_TITULO_BG, fg=C_TITULO_FG, font=F_TITULO, anchor="w", padx=10,
         )
-        self.lbl_titulo.grid(row=0, column=0, columnspan=3, sticky="ew", pady=(0, 4))
+        p.lbl_titulo.grid(row=0, column=0, columnspan=3, sticky="ew", pady=(0, 4))
+        self.lbl_titulo = p.lbl_titulo
 
-        self.lbl_sub = tk.Label(self, text="", font=F_SUB, fg=C_SUB_FG, anchor="w")
+        self.lbl_sub = tk.Label(p, text="", font=F_SUB, fg=C_SUB_FG, anchor="w")
         self.lbl_sub.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(0, 10))
 
         for col, txt in ((0, "DATO"), (1, "VALOR"), (2, "COMENTARIO")):
-            tk.Label(self, text=txt, bg=C_HEAD_BG, font=F_HEAD, anchor="center", pady=3).grid(
+            tk.Label(p, text=txt, bg=C_HEAD_BG, font=F_HEAD, anchor="center", pady=3).grid(
                 row=2, column=col, sticky="ew", padx=(0, 6)
             )
 
         self.entradas: dict[str, tk.Entry] = {}
         r = 3
         for clave, etiqueta, comentario in self.FILAS_ENTRADA:
-            tk.Label(self, text=etiqueta, font=F_LABEL, anchor="w").grid(
+            tk.Label(p, text=etiqueta, font=F_LABEL, anchor="w").grid(
                 row=r, column=0, sticky="ew", padx=(0, 6), pady=2)
-            e = tk.Entry(self, textvariable=self.vars[clave], font=F_INPUT, justify="center",
+            e = tk.Entry(p, textvariable=self.vars[clave], font=F_INPUT, justify="center",
                          bg=C_INPUT_BG, relief="solid", bd=1)
             e.grid(row=r, column=1, sticky="ew", padx=(0, 6), pady=2)
             e.bind("<Return>", lambda _e: self.recalcular())
             self.entradas[clave] = e
-            tk.Label(self, text=comentario, font=F_TEXTO, fg=C_SUB_FG, anchor="w").grid(
+            tk.Label(p, text=comentario, font=F_TEXTO, fg=C_SUB_FG, anchor="w").grid(
                 row=r, column=2, sticky="ew", pady=2)
             r += 1
 
         r += 1
         self._fila_valor(r, "PREDICCION TOTAL", "Usa 1Q+2Q si hay 2Q; si no, solo 1Q", "pred")
         r += 1
-        self.lbl_exacto = tk.Label(self, text="", font=F_PEQUE, fg=C_SUB_FG, anchor="w")
+        self.lbl_exacto = tk.Label(p, text="", font=F_PEQUE, fg=C_SUB_FG, anchor="w")
         self.lbl_exacto.grid(row=r, column=0, columnspan=3, sticky="ew", padx=(0, 6))
         r += 1
         self._fila_valor(r, "Pronostico solo con 1Q", "Modelo lineal calibrado con la liga entera", "solo")
@@ -141,12 +160,12 @@ class Pestana(ttk.Frame):
         self._fila_valor(r, "Pronostico menos linea", "Positivo = por encima de la linea", "dif")
         r += 1
 
-        tk.Label(self, text="VEREDICTO over / under", font=F_LABEL, anchor="w").grid(
+        tk.Label(p, text="VEREDICTO over / under", font=F_LABEL, anchor="w").grid(
             row=r, column=0, sticky="ew", padx=(0, 6), pady=2)
-        self.lbl_veredicto = tk.Label(self, text="faltan datos", font=F_VEREDICTO, anchor="center",
+        self.lbl_veredicto = tk.Label(p, text="faltan datos", font=F_VEREDICTO, anchor="center",
                                       bg=C_VERDICTO_OK, fg=C_VERDE, pady=4)
         self.lbl_veredicto.grid(row=r, column=1, sticky="ew", padx=(0, 6), pady=2)
-        tk.Label(self, text="Compara el pronostico con la linea", font=F_TEXTO,
+        tk.Label(p, text="Compara el pronostico con la linea", font=F_TEXTO,
                  fg=C_SUB_FG, anchor="w").grid(row=r, column=2, sticky="ew", pady=2)
         r += 1
 
@@ -163,30 +182,30 @@ class Pestana(ttk.Frame):
             ("basta", "Con el 1Q basta?", "El error baja con el 2Q"),
         ]
         for clave, etiqueta, comentario in filas_metricas:
-            tk.Label(self, text=etiqueta, font=F_LABEL, anchor="w").grid(
+            tk.Label(p, text=etiqueta, font=F_LABEL, anchor="w").grid(
                 row=r, column=0, sticky="ew", padx=(0, 6), pady=2)
-            lbl = tk.Label(self, text="", font=F_TEXTO, anchor="center", width=22)
+            lbl = tk.Label(p, text="", font=F_TEXTO, anchor="center", width=22)
             lbl.grid(row=r, column=1, sticky="ew", padx=(0, 6), pady=2)
             self.metricas[clave] = lbl
-            c = tk.Label(self, text=comentario, font=F_TEXTO, fg=C_SUB_FG, anchor="w")
+            c = tk.Label(p, text=comentario, font=F_TEXTO, fg=C_SUB_FG, anchor="w")
             c.grid(row=r, column=2, sticky="ew", pady=2)
             if clave == "basta":
                 self.lbl_basta_coment = c
             r += 1
 
         r += 1
-        tk.Label(self, text="EXTRA (no esta en el Excel)", font=("Calibri", 10, "bold"),
+        tk.Label(p, text="EXTRA (no esta en el Excel)", font=("Calibri", 10, "bold"),
                  fg=C_SUB_FG, anchor="w").grid(row=r, column=0, columnspan=3, sticky="ew")
         r += 1
-        tk.Label(self, text="Probabilidad de OVER", font=F_LABEL, anchor="w").grid(
+        tk.Label(p, text="Probabilidad de OVER", font=F_LABEL, anchor="w").grid(
             row=r, column=0, sticky="ew", padx=(0, 6), pady=2)
-        self.lbl_prob = tk.Label(self, text="", font=F_TEXTO, anchor="center", width=22)
+        self.lbl_prob = tk.Label(p, text="", font=F_TEXTO, anchor="center", width=22)
         self.lbl_prob.grid(row=r, column=1, sticky="ew", padx=(0, 6), pady=2)
-        tk.Label(self, text="P = Φ((prediccion - linea) / RMSE)", font=F_TEXTO,
+        tk.Label(p, text="P = Φ((prediccion - linea) / RMSE)", font=F_TEXTO,
                  fg=C_SUB_FG, anchor="w").grid(row=r, column=2, sticky="ew", pady=2)
 
         r += 2
-        caja = tk.Frame(self)
+        caja = tk.Frame(p)
         caja.grid(row=r, column=0, columnspan=3, sticky="w", pady=(8, 0))
         tk.Button(caja, text="Calcular (Enter)", font=F_LABEL, width=18,
                   command=self.recalcular).pack(side="left", padx=(0, 6))
@@ -195,21 +214,47 @@ class Pestana(ttk.Frame):
         tk.Button(caja, text="Ejemplo del Excel", font=F_TEXTO, width=16,
                   command=self.ejemplo).pack(side="left")
 
-        self.columnconfigure(0, weight=3)
-        self.columnconfigure(1, weight=1)
-        self.columnconfigure(2, weight=4)
+        p.columnconfigure(0, weight=3)
+        p.columnconfigure(1, weight=1)
+        p.columnconfigure(2, weight=4)
+
+    # ------------------------------------------------- desplazamiento (bajo)
+    def _panel_configurado(self, _evento=None) -> None:
+        """La barra solo aparece si el contenido es más alto que la ventana."""
+        self._canvas.configure(scrollregion=self._canvas.bbox("all"))
+        cabe = self._panel.winfo_reqheight() <= self._canvas.winfo_height() + 2
+        if cabe and self._vsb_visible:
+            self._vsb.pack_forget()
+            self._vsb_visible = False
+        elif not cabe and not self._vsb_visible:
+            self._vsb.pack(side="right", fill="y")
+            self._vsb_visible = True
+
+    def _canvas_configurado(self, event) -> None:
+        # el panel ocupa todo el ancho disponible: nunca barra horizontal
+        self._canvas.itemconfigure(self._ventana_canvas, width=event.width)
+
+    def _rueda_on(self, _evento=None) -> None:
+        self._canvas.bind_all("<MouseWheel>", self._rueda)
+
+    def _rueda_off(self, _evento=None) -> None:
+        self._canvas.unbind_all("<MouseWheel>")
+
+    def _rueda(self, event) -> None:
+        self._canvas.yview_scroll(int(-event.delta / 120), "units")
 
     def _fila_valor(self, row: int, etiqueta: str, comentario: str, clave: str) -> None:
-        tk.Label(self, text=etiqueta, font=F_LABEL, anchor="w").grid(
+        p = self._panel
+        tk.Label(p, text=etiqueta, font=F_LABEL, anchor="w").grid(
             row=row, column=0, sticky="ew", padx=(0, 6), pady=2)
         es_pred = clave == "pred"
         estilo = {"font": F_PRED if es_pred else F_TEXTO}
         if es_pred:
             estilo.update(bg=C_PRED_BG, fg=C_VERDE, pady=3)
-        lbl = tk.Label(self, text="", anchor="center", **estilo)
+        lbl = tk.Label(p, text="", anchor="center", **estilo)
         lbl.grid(row=row, column=1, sticky="ew", padx=(0, 6), pady=2)
         setattr(self, f"out_{clave}", lbl)
-        tk.Label(self, text=comentario, font=F_TEXTO, fg=C_SUB_FG, anchor="w").grid(
+        tk.Label(p, text=comentario, font=F_TEXTO, fg=C_SUB_FG, anchor="w").grid(
             row=row, column=2, sticky="ew", pady=2)
 
     def limpiar(self) -> None:
@@ -307,46 +352,63 @@ class PestanaVivo(ttk.Frame):
         self._job_auto = None
         self._partido_sel: api_betplay.Partido | None = None
         # --- apuesta automática en el descanso 2Q→3Q ---
-        self.var_auto_apostar = tk.BooleanVar(value=False)
-        self.var_umbral = tk.DoubleVar(value=UMBRAL_POR_DEFECTO)
+        # Se recuerda entre sesiones: si la dejaste encendida, al abrir la app
+        # ya está encendida (y arranca sola el sondeo, porque sin ping no hay
+        # descanso que detectar). Primera ejecución: AUTO encendido.
+        vivo = base_datos.cargar_config().get("vivo", {}) or {}
+        self.var_auto_apostar = tk.BooleanVar(
+            value=bool(vivo.get("auto_apostar", True)))
+        self.var_umbral = tk.DoubleVar(
+            value=float(vivo.get("umbral", UMBRAL_POR_DEFECTO)))
+        self.var_auto = tk.BooleanVar(
+            value=bool(vivo.get("auto", self.var_auto_apostar.get())))
+        self.var_intervalo = tk.IntVar(
+            value=int(vivo.get("intervalo", INTERVALO_POR_DEFECTO)))
         self._ventanas: dict[int, float] = {}      # evento_id -> marca al abrir
         self._apuestas_auto: set[int] = set()      # evento_id ya apostados
         self._transitos: dict[int, tuple[str, float]] = {}  # para medir descansos
         self._construir()
+        # guardar al cambiar cualquier control (van ya montados)
+        for _v in (self.var_auto, self.var_intervalo,
+                   self.var_auto_apostar, self.var_umbral):
+            _v.trace_add("write", lambda *_a: self._guardar_vivo())
 
     # ------------------------------------------------------------------ UI
     def _construir(self) -> None:
         # --- barra superior: liga + ping + automático ---
-        top = tk.Frame(self)
-        top.pack(fill="x", pady=(0, 6))
+        # En pantallas estrechas se parte en dos filas; en anchas va todo
+        # seguido en una (responsive, sin ocupar altura de más).
+        self._top = tk.Frame(self)
+        self._top.pack(fill="x", pady=(0, 6))
+        self._top_a = tk.Frame(self._top)
+        self._top_b = tk.Frame(self._top)
 
-        tk.Label(top, text="Liga:", font=F_LABEL).pack(side="left")
+        lbl_liga = tk.Label(self._top_a, text="Liga:", font=F_LABEL)
         self.var_liga = tk.StringVar(value=self.TODAS)
-        self.combo_liga = ttk.Combobox(top, textvariable=self.var_liga, width=32,
+        self.combo_liga = ttk.Combobox(self._top_a, textvariable=self.var_liga, width=32,
                                        state="readonly", values=(self.TODAS,))
-        self.combo_liga.pack(side="left", padx=(4, 10))
         self.combo_liga.bind("<<ComboboxSelected>>", lambda _e: self.hacer_ping())
 
-        self.btn_ping = tk.Button(top, text="⚡ PING AHORA", font=F_LABEL, width=16,
+        self.btn_ping = tk.Button(self._top_a, text="⚡ PING AHORA", font=F_LABEL, width=16,
                                   bg=C_AZUL, fg="white", command=self.hacer_ping)
-        self.btn_ping.pack(side="left", padx=(0, 8))
 
-        self.var_auto = tk.BooleanVar(value=False)
-        self.chk_auto = tk.Checkbutton(top, text="Automatico cada", variable=self.var_auto,
+        self.chk_auto = tk.Checkbutton(self._top_a, text="Automatico cada",
+                                       variable=self.var_auto,
                                        font=F_TEXTO, command=self.toggle_auto)
-        self.chk_auto.pack(side="left", padx=(0, 4))
+        spin = tk.Spinbox(self._top_a, from_=2, to=60, textvariable=self.var_intervalo,
+                          width=4, font=F_TEXTO)
+        lbl_seg = tk.Label(self._top_a, text="seg", font=F_TEXTO)
 
-        self.var_intervalo = tk.IntVar(value=INTERVALO_POR_DEFECTO)
-        spin = tk.Spinbox(top, from_=2, to=60, textvariable=self.var_intervalo, width=4,
-                          font=F_TEXTO)
-        spin.pack(side="left", padx=(0, 4))
-        tk.Label(top, text="seg", font=F_TEXTO).pack(side="left", padx=(0, 12))
+        self.lbl_ultima = tk.Label(self._top_b, text="aún sin consultar",
+                                   font=F_PEQUE, fg=C_SUB_FG)
+        self.lbl_ping_estado = tk.Label(self._top_b, text="", font=F_PEQUE, fg=C_SUB_FG)
 
-        self.lbl_ultima = tk.Label(top, text="aún sin consultar", font=F_PEQUE, fg=C_SUB_FG)
-        self.lbl_ultima.pack(side="left", padx=(0, 12))
-
-        self.lbl_ping_estado = tk.Label(top, text="", font=F_PEQUE, fg=C_SUB_FG)
-        self.lbl_ping_estado.pack(side="right")
+        self._controles = [lbl_liga, self.combo_liga, self.btn_ping,
+                           self.chk_auto, spin, lbl_seg]
+        self._estado = [self.lbl_ultima, self.lbl_ping_estado]
+        self._top_modo = None
+        self._top.bind("<Configure>", self._repack_top)
+        self._repack_top()
 
         # --- oportunidad destacada (solo en modo "todas las ligas") ---
         self.lbl_oportunidad = tk.Label(
@@ -479,6 +541,32 @@ class PestanaVivo(ttk.Frame):
         self.lbl_auto_estado = tk.Label(
             auto, text="AUTO apagado", font=F_PEQUE, fg=C_SUB_FG)
         self.lbl_auto_estado.pack(side="left")
+
+    def _repack_top(self, _evento=None) -> None:
+        """Una sola fila si cabe todo; si no, se reparte en dos (responsive)."""
+        ancho = self._top.winfo_width() or self._top.winfo_reqwidth()
+        a = sum(w.winfo_reqwidth() + 10 for w in self._controles)
+        b = sum(w.winfo_reqwidth() + 10 for w in self._estado)
+        modo = "una" if a + b <= ancho else "dos"
+        if modo == self._top_modo:
+            return          # ya está así: evita bucle de repintados
+        self._top_modo = modo
+
+        self._top_a.pack_forget()
+        self._top_b.pack_forget()
+        for w in self._controles + self._estado:
+            w.pack_forget()
+
+        if modo == "una":
+            self._top_a.pack(side="left", fill="x")
+            self._top_b.pack(side="left")
+        else:
+            self._top_a.pack(fill="x")
+            self._top_b.pack(fill="x")
+        for w in self._controles:
+            w.pack(side="left", padx=(0, 6))
+        for w in self._estado:
+            w.pack(side="left", padx=(0, 12))
 
     # ------------------------------------------------------------- acciones
     def hacer_ping(self) -> None:
@@ -751,17 +839,22 @@ class PestanaVivo(ttk.Frame):
         self.calcular_flujo()
 
     def toggle_auto(self) -> None:
-        if self.var_auto.get():
+        # Cancelar antes cualquier timer: si no, llamar dos veces deja dos
+        # bucles de sondeo corriendo en paralelo.
+        if self._job_auto:
+            try:
+                self.after_cancel(self._job_auto)
+            except Exception:   # noqa: BLE001
+                pass
+            self._job_auto = None
+        if self.var_auto.get() and not getattr(self.app, "_cerrando", False):
             self._auto_activo = True
             self._programar_auto()
         else:
             self._auto_activo = False
-            if self._job_auto:
-                self.after_cancel(self._job_auto)
-                self._job_auto = None
 
     def _programar_auto(self) -> None:
-        if not self._auto_activo:
+        if not self._auto_activo or getattr(self.app, "_cerrando", False):
             return
         self.hacer_ping()
         try:
@@ -771,16 +864,57 @@ class PestanaVivo(ttk.Frame):
         self._job_auto = self.after(seg * 1000, self._programar_auto)
 
     # -------------------------------------------------- apuesta automática
+    def _guardar_vivo(self) -> None:
+        """Recuerda la configuración de la pestaña EN VIVO en config.json."""
+        try:
+            intervalo = max(2, int(self.var_intervalo.get()))
+        except (ValueError, tk.TclError):
+            intervalo = INTERVALO_POR_DEFECTO
+        try:
+            umbral = float(self.var_umbral.get())
+        except (ValueError, tk.TclError):
+            umbral = UMBRAL_POR_DEFECTO
+        try:
+            cfg = base_datos.cargar_config()
+            cfg["vivo"] = {
+                "auto": bool(self.var_auto.get()),
+                "intervalo": intervalo,
+                "auto_apostar": bool(self.var_auto_apostar.get()),
+                "umbral": umbral,
+            }
+            base_datos.guardar_config(cfg)
+        except Exception:   # noqa: BLE001  (guardar la preferencia no puede romper la app)
+            pass
+
+    def arrancar_automatico(self) -> None:
+        """
+        Arranca sola al abrir la app: apuesta en el descanso + vista cada 5 s.
+
+        No depende de nada que tengas que marcar: apenas se abre la aplicación
+        ya está mirando los descansos de todas las ligas y refrescando la tabla
+        cada 5 segundos. Solo puedes apagarlo tú a mano.
+        """
+        self.var_intervalo.set(5)
+        self.var_auto_apostar.set(True)
+        self.toggle_auto_apostar()      # pone el texto, el aviso y el sondeo
+
     def toggle_auto_apostar(self) -> None:
         """Enciende/apaga la apuesta automática en el descanso 2Q→3Q."""
         if self.var_auto_apostar.get():
+            # sin sondeo no hay descanso que detectar: se enciende también.
+            # Se mira _auto_activo, no solo la casilla: si la casilla ya
+            # venía marcada de la config pero el bucle no corre, hay que
+            # arrancarlo igualmente.
+            if not self.var_auto.get() or not self._auto_activo:
+                self.var_auto.set(True)
+                self.toggle_auto()
             self.lbl_auto_estado.config(
                 text="AUTO: vigilo el descanso de todas las ligas…", fg=C_AZUL)
             self.lbl_oportunidad.config(
                 text="AUTO activo: se apuesta SOLO en el descanso 2Q→3Q "
                      "(1Q y 2Q finales) cuando |Δ| ≥ el umbral y el mercado "
-                     "está abierto. Activa 'Automático cada 5 s' para que "
-                     "vigile sin parar.",
+                     "está abierto. La apuesta se guarda sola en APUESTAS y "
+                     "se resuelve al terminar el partido.",
                 fg=C_AZUL)
         else:
             self._ventanas.clear()
@@ -1155,6 +1289,8 @@ class PestanaApuestas(ttk.Frame):
                  font=F_TITULO, bg=C_TITULO_BG, fg=C_TITULO_FG, anchor="w", padx=10,
                  pady=4).pack(fill="x")
 
+        # 8 cajas: en rejilla de 4 columnas se adaptan a cualquier ancho
+        # (en pantallas estrechas ya no se salen de la ventana)
         resumen = tk.Frame(self)
         resumen.pack(fill="x", pady=(0, 6))
         self.labels_resumen: dict[str, tk.Label] = {}
@@ -1163,10 +1299,12 @@ class PestanaApuestas(ttk.Frame):
             ("perdidas", "Perdidas"), ("anuladas", "Anuladas"),
             ("aciertos", "% Aciertos"), ("roi", "ROI"), ("beneficio", "Beneficio"),
         ]
-        for clave, texto in claves:
+        for col in range(4):
+            resumen.columnconfigure(col, weight=1, uniform="resumen")
+        for i, (clave, texto) in enumerate(claves):
             caja = tk.Frame(resumen, bg=C_AZUL_CLARO, padx=8, pady=4,
                             highlightbackground=C_AZUL, highlightthickness=1)
-            caja.pack(side="left", padx=(0, 6))
+            caja.grid(row=i // 4, column=i % 4, sticky="ew", padx=(0, 6), pady=(0, 4))
             tk.Label(caja, text=texto, font=F_PEQUE, bg=C_AZUL_CLARO, fg=C_AZUL).pack()
             lbl = tk.Label(caja, text="—", font=("Calibri", 12, "bold"), bg=C_AZUL_CLARO)
             lbl.pack()
@@ -1269,8 +1407,8 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Predicciones en vivo — Excel → Python + API BetPlay + Paperbet")
-        self.geometry("1120x860")
-        self.minsize(980, 720)
+        self._cerrando = False
+        self.ajustar_a_pantalla()
         self.excel = RUTA_DEFECTO
         self.modelos: dict[str, Modelo] = {}
         # modelos MCO entrenados con partidos reales de cada liga (ver modelos.py)
@@ -1284,6 +1422,44 @@ class App(tk.Tk):
 
         self.cargar_datos()
         self._iniciar_base_datos()
+
+    def ajustar_a_pantalla(self) -> None:
+        """
+        Ajusta la ventana al monitor donde se esté abriendo.
+
+        El objetivo es que NUNCA sea más alta (ni más ancha) que la pantalla:
+        se mide el tamaño disponible y la ventana se centra con ese tamaño.
+        El contenido, si no cabe, se estira o se desplaza en vertical (ver
+        `Pestana`, que lleva barra de desplazamiento cuando hace falta).
+        """
+        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+        # margen: barra de tareas de Windows + marco/título de la ventana
+        disp_ancho, disp_alto = sw - 20, sh - 110
+        ancho = max(720, min(1240, disp_ancho))
+        alto = max(480, min(900, disp_alto))
+        x = max(0, (sw - ancho) // 2)
+        y = max(0, (sh - alto - 70) // 2)
+        self.geometry(f"{ancho}x{alto}+{x}+{y}")
+        self.minsize(min(720, ancho), min(480, alto))
+        self.resizable(True, True)
+
+    def destroy(self) -> None:  # noqa: D102
+        """Cierra limpiando los timers del sondeo (si no, Tk avisa al cerrar)."""
+        self._cerrando = True
+        v = getattr(self, "pestana_vivo", None)
+        if v is not None:
+            v._auto_activo = False
+            if getattr(v, "_job_auto", None):
+                try:
+                    self.after_cancel(v._job_auto)
+                except Exception:   # noqa: BLE001
+                    pass
+                v._job_auto = None
+        try:
+            super().destroy()
+        except tk.TclError:
+            # al cerrar, los widgets dejan de existir mientras se desmontan
+            pass
 
     # ---------------------------------------------------------------- menú
     def _menu(self) -> None:
@@ -1358,6 +1534,8 @@ class App(tk.Tk):
         threading.Thread(target=trabajo, daemon=True).start()
 
         def comprobar():
+            if self._cerrando:      # la ventana ya no existe: no tocar nada
+                return
             if not caja["hecho"]:
                 self.after(150, comprobar)
                 return
@@ -1664,6 +1842,8 @@ def main() -> int:
     # descubre las ligas una vez arrancado el bucle de eventos (nunca desde un hilo)
     app.after(300, app.pestana_vivo.cargar_ligas)
     app.after(800, app.cargar_modelos_ligas)
+    # en cuanto se abre ya está vigiando los descansos y refrescando cada 5 s
+    app.after(1200, app.pestana_vivo.arrancar_automatico)
     app.mainloop()
     return 0
 

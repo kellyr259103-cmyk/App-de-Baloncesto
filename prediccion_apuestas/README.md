@@ -150,10 +150,16 @@ hace falta una regla definida. Esta es:
 | **Autocalibración** | La app **mide** la duración real de cada descanso (del fin del 2Q al arranque del 3Q) y la guarda en la tabla `descansos_liga`. Con esa medida se puede afinar la tabla. |
 | **Seguro anti-datos-viejos** | Si un partido lleva "en descanso" más minutos que la duración oficial **+ 2 de margen**, la ventana **caduca**: no se apuesta con una línea que ya no refleja el partido (evita el caso de la API dejando de actualizar). |
 
-### 6. Apuesta automática en el descanso (casilla **AUTO**)
+### 6. Apuesta automática en el descanso — **va sola al abrir**
 
-Con la casilla **AUTO: apostar en el descanso (2Q→3Q) con Δ ≥** marcada, la app
-hace sola **todo el circuito** en cada ping:
+**No hay que marcar nada.** Al abrir la app (`app.pestana_vivo.arrancar_automatico()`)
+quedan encendidos, sin depender de la sesión anterior:
+
+- la **vista en vivo cada 5 s** (`Automático cada 5 seg`),
+- la **apuesta automática** (`AUTO: apostar en el descanso (2Q→3Q)`).
+
+La única forma de pararla es desmarcarlo tú a mano. El circuito que hace en cada
+ping es:
 
 1. **Detecta** los partidos dentro de la ventana 2Q→3Q (regla anterior).
 2. **Verifica** que hay modelo de esa liga, que el mercado está **abierto**, que
@@ -165,11 +171,28 @@ hace sola **todo el circuito** en cada ping:
 5. Al **terminar el partido la resuelve sola** (GANADA / PERDIDA / ANULADA), igual
    que las apuestas manuales, y puedes ver el total final y el beneficio.
 
-Para que vigile sin parar, activa también **Automático cada N s** (5 s). El contador
-del panel muestra cuántos partidos hay en descanso y cuántas apuestas ha hecho.
+El contador del panel muestra cuántos partidos hay en descanso y cuántas apuestas
+ha hecho.
 
 > ⚠️ **Solo se apuesta en el descanso**, nunca antes (el 2Q podría seguir) ni
 > después (la línea ya se habría reajustado al 3Q).
+
+> La casilla `Automatico cada N seg` y la casilla `AUTO` se recuerdan igualmente
+> en `config.json → "vivo"`, pero al arrancar la app **se fuerzan a encendidas**.
+
+### 6.1 Ventana responsive — nunca más alta que la pantalla
+
+`App.ajustar_a_pantalla()` mide el monitor al abrir y dimensiona la ventana
+**dentro** de la pantalla disponible (por defecto 1240×900 como máximo, y se
+centra). En un portátil de 1366×768 queda en torno a 1240×658.
+
+Además, si el contenido no cabe:
+
+| Pestaña | Qué hace |
+|---|---|
+| **EUROLIGA / NBA** | El contenido va dentro de un canvas con **barra vertical que solo aparece si desborda**; se desplaza con la rueda del ratón. |
+| **EN VIVO** | La barra superior (liga + ping + automático) se reparte en **dos filas** si no cabe todo en una; la tabla absorbe el alto que sobra. |
+| **APUESTAS** | Las 8 cajas de resumen van en **rejilla 4×2** en vez de una fila de 8, así no se salen en pantallas estrechas. |
 
 ### 7. Backtest walk-forward (`backtest.py`) — ¿cómo nos habría ido en 2026?
 
@@ -306,10 +329,12 @@ python prueba_historico.py   # descarga de histórico desde API-Sports (cuota: 4
 python prueba_modelos.py     # pipeline: descargar → entrenar (con holdout) → guardar → predecir
 python prueba_descansos.py   # regla del descanso 2Q→3Q: ventana, duración, caducidad
 python prueba_auto_descanso.py  # circuito automático: descanso → apuesta sola → resolución
+python prueba_automatico.py     # arranque solo (AUTO + 5 s) + ventana responsive
 ```
 
 Las de GUI (`prueba_bd.py`, `prueba_gui.py`, `prueba_gui_ligas.py`,
-`prueba_auto_descanso.py`) borran las apuestas de prueba al terminar.
+`prueba_auto_descanso.py`, `prueba_automatico.py`) borran las apuestas de prueba
+al terminar.
 `prueba_historico.py` gasta ~4 peticiones de la cuota diaria de API-Sports y
 `prueba_modelos.py` ~2.
 
