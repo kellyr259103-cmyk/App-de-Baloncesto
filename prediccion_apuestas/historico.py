@@ -83,11 +83,13 @@ LIGAS_API_SPORTS: dict[str, tuple[int, ...]] = {
     "italy/lega_a": (52,),                 # Lega A / Italy
     "italy/serie_a2": (242,),              # Serie A2 / Italy
     "japan/b1__league": (56,),             # B League / Japan
+    "japan/b2_league": (407,),             # B2.League / Japan
     "lithuania/lkl": (60,),                # LKL / Lithuania
     "new_zealand/tauihi_basketball_aotearoa__w_": (375,),   # Tauihi W / Nueva Zelanda
     "philippines/pba": (151, 152, 153,),   # Philippine/Governors/Commissioners Cup
     "poland/plk": (72,),                   # Energa Basket Liga / Poland
     "portugal/campeonato_nacional_2": (261,),   # Proliga / Portugal
+    "portugal/lpb": (74,),                 # LPB (1ª división) / Portugal
     "portugal/lfb__w_": (260,),            # LFB Women / Portugal
     "portugal/taca_de_portugal": (75,),    # Taca de Portugal / Portugal
     "portugal/taca_de_portugal__w_": (400,),    # Taca de Portugal Women

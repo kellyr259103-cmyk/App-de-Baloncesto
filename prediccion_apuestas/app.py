@@ -64,6 +64,26 @@ UMBRAL_POR_DEFECTO = 2.0           # Δ mínimo (pts) para apostar solo en el de
 # la casa (con su margen del ~8%, un Δ pequeño puede ser -EV igualmente).
 EV_MINIMA_POR_DEFECTO = 0.0
 
+# Historial permanente de las decisiones del bot automático. Responde de forma
+# definitiva a "¿y por qué no ha apostado?": la interfaz solo puede enseñar el
+# motivo mientras el partido sigue en el descanso, y ese motivo se pierde al
+# pasar al 3Q. (*.log ya está en .gitignore)
+CARPETA_LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "log")
+ARCHIVO_LOG = os.path.join(CARPETA_LOG, "auto_apuestas.log")
+
+
+def log_auto(texto: str) -> None:
+    """Anota una decisión del bot con su hora. Nunca rompe la app."""
+    try:
+        os.makedirs(CARPETA_LOG, exist_ok=True)
+        if os.path.exists(ARCHIVO_LOG) and os.path.getsize(ARCHIVO_LOG) > 400_000:
+            os.remove(ARCHIVO_LOG)         # empieza de cero en vez de crecer
+        marca = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with open(ARCHIVO_LOG, "a", encoding="utf-8") as fh:
+            fh.write(f"{marca}  {texto}\n")
+    except OSError:
+        pass
+
 
 def f1(v) -> str:
     return "" if v is None else f"{v:.1f}"
@@ -374,6 +394,7 @@ class PestanaVivo(ttk.Frame):
         self._apuestas_auto: set[int] = set()      # evento_id ya apostados
         self._transitos: dict[int, tuple[str, float]] = {}  # para medir descansos
         self._motivos_auto: Counter = Counter()    # por qué NO se apuesta
+        self._log_ya: set[tuple[int, str]] = set()  # no repetir en el log
         self._construir()
         # guardar al cambiar cualquier control (van ya montados)
         for _v in (self.var_auto, self.var_intervalo, self.var_auto_apostar,
@@ -981,6 +1002,21 @@ class PestanaVivo(ttk.Frame):
         motivos: Counter = Counter()
         ahora = time.time()
 
+        def rechazar(p, motivo: str) -> None:
+            """Cuenta el motivo y lo deja escrito en el log del bot.
+
+            El log es CLAVE: la interfaz solo puede enseñar el motivo mientras
+            el partido sigue en el descanso, y al pasar al 3Q se pierde. Aquí
+            queda para siempre, y sin repetir la misma línea 20 veces por los
+            pings del descanso.
+            """
+            motivos[motivo] += 1
+            k = (p.evento_id, motivo)
+            if k not in self._log_ya:
+                self._log_ya.add(k)
+                log_auto(f"[{p.clave_liga}] {p.nombre[:44]} · NO apuesta: "
+                         f"{motivo}")
+
         for p in partidos:
             if p.finalizado:
                 continue
@@ -991,11 +1027,17 @@ class PestanaVivo(ttk.Frame):
                 self._ventanas.pop(p.evento_id, None)
                 continue
             en_descanso += 1
-            marca = self._ventanas.setdefault(p.evento_id, ahora)
+            if p.evento_id not in self._ventanas:
+                self._ventanas[p.evento_id] = ahora
+                log_auto(f"[{p.clave_liga}] {p.nombre[:44]} · entra en descanso "
+                         f"2Q→3Q · 1Q={p.q1} 2Q={p.q2} línea={p.linea} "
+                         f"O={p.cuota_over} U={p.cuota_under} "
+                         f"mercado={'abierto' if p.mercado_abierto else 'cerrado'}")
+            marca = self._ventanas[p.evento_id]
 
             ok, motivo = descansos.puede_apostar(p, p.clave_liga, marca)
             if not ok:
-                motivos[motivo] += 1
+                rechazar(p, motivo)
                 continue
             if p.evento_id in self._apuestas_auto:
                 continue            # ya apostado en este partido
@@ -1007,18 +1049,22 @@ class PestanaVivo(ttk.Frame):
             # nba_preseason, que cae al modelo de la NBA con n=1380).
             modelo, etiqueta = self.app.modelo_para_partido(p, "AUTO")
             if modelo is None or not modelo.n:
-                motivos["sin modelo usable (ni de la liga ni del Excel)"] += 1
+                rechazar(p, "sin modelo usable (ni de la liga ni del Excel)")
                 continue
             es_fallback = "sin datos de" in etiqueta
 
-            res = predecir(modelo, float(p.q1),
-                           None if not p.q2_completo else float(p.q2),
-                           float(p.linea))
+            try:
+                res = predecir(modelo, float(p.q1),
+                               None if not p.q2_completo else float(p.q2),
+                               float(p.linea))
+            except Exception as exc:        # noqa: BLE001
+                rechazar(p, f"el modelo no pudo predecir ({exc})")
+                continue
             if res.veredicto not in ("OVER", "UNDER"):
-                motivos["veredicto sin decidir"] += 1
+                rechazar(p, "veredicto sin decidir")
                 continue
             if abs(res.diferencia) < umbral:
-                motivos[f"|Δ| < {umbral:.1f}"] += 1
+                rechazar(p, f"|Δ| {abs(res.diferencia):.1f} < {umbral:.1f}")
                 continue
 
             # --- ¿la casa tiene ABIERTO el lado que queremos jugar? ---
@@ -1026,10 +1072,10 @@ class PestanaVivo(ttk.Frame):
             cuota = p.cuota_over if lado == "OVER" else p.cuota_under
             disponible = p.hay_cuota_over if lado == "OVER" else p.hay_cuota_under
             if not cuota or cuota <= 1.0:
-                motivos[f"la casa no publica cuota del {lado}"] += 1
+                rechazar(p, f"la casa no publica cuota del {lado}")
                 continue
             if not disponible:
-                motivos[f"{lado} SUSPENDIDO por la casa"] += 1
+                rechazar(p, f"{lado} SUSPENDIDO por la casa")
                 continue
 
             # --- ¿es rentable con esa cuota? (EV = P*cuota - 1) ---
@@ -1039,7 +1085,7 @@ class PestanaVivo(ttk.Frame):
                 prob_lado = 0.5
             esperado = prob_lado * cuota - 1.0
             if esperado < ev_min:
-                motivos[f"EV {esperado * 100:+.1f}% < {ev_min * 100:.1f}%"] += 1
+                rechazar(p, f"EV {esperado * 100:+.1f}% < {ev_min * 100:.1f}%")
                 continue
 
             try:
@@ -1047,6 +1093,7 @@ class PestanaVivo(ttk.Frame):
             except (ValueError, tk.TclError):
                 stake = float(STAKE_POR_DEFECTO)
             if stake <= 0:
+                rechazar(p, "stake a 0")
                 continue
 
             apuesta = Apuesta(
@@ -1071,16 +1118,22 @@ class PestanaVivo(ttk.Frame):
             )
             error = paperbet.validar(apuesta)
             if error:
-                motivos[f"apuesta rechazada: {error}"] += 1
+                rechazar(p, f"apuesta rechazada: {error}")
                 continue
             try:
                 id_apuesta = base_datos.guardar_apuesta(apuesta)
             except base_datos.ErrorBaseDatos as exc:
+                log_auto(f"[{p.clave_liga}] ERROR al guardar: {exc}")
                 self.lbl_auto_estado.config(
                     text=f"AUTO: error al guardar ({exc})", fg=C_ROJO_FG)
                 return
             self._apuestas_auto.add(p.evento_id)
             apostadas += 1
+            log_auto(f"[{p.clave_liga}] {p.nombre[:44]} · APUESTA id={id_apuesta} "
+                     f"{lado} @ {cuota:.2f} línea={p.linea} stake={stake:.0f} "
+                     f"Δ={res.diferencia:+.1f} EV={esperado * 100:+.1f}% "
+                     f"modelo={modelo.liga} (n={modelo.n})"
+                     + ("  ⚠RESPALDO" if es_fallback else ""))
             self.app.refrescar_apuestas()
 
         self._motivos_auto = motivos

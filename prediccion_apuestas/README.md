@@ -107,16 +107,21 @@ Fuente de datos: **API-Sports** (`https://v1.basketball.api-sports.io`), token e
 
 `python cobertura_ligas.py --comprobar` comprueba que **cada liga que publica la
 casa** puede apostarse por el bot (sale con código 1 si alguna se queda sin
-modelo, así sirve de test). Hoy: **24 de 24**.
+modelo, así sirve de test). Hoy: **25 de 25** — 24 con modelo propio y NBA
+Pretemporada con el de la NBA.
 
 Cómo se llegó ahí:
 
-- **Mapa ampliado** (`historico.LIGAS_API_SPORTS`): se añadieron 5 ligas que
-  estaban en el feed sin traducción a API-Sports — Austria/ÖBL (id 217),
-  Lituania/LKL (60), Reino Unido/SLB (108), Letonia-Estonia/LEBL (204) y
-  Nueva Zelanda/Tauihi (375). Los ids se hallaron con
-  `descubrir_ligas.py`, que baja el listado completo de API-Sports (1 petición)
-  y busca por nombre.
+- **Mapa ampliado** (`historico.LIGAS_API_SPORTS`): se añadieron 7 ligas que
+  estaban en el feed sin traducción a API-Sports — Austria/ÖBL (217),
+  Lituania/LKL (60), Reino Unido/SLB (108), Letonia-Estonia/LEBL (204),
+  Nueva Zelanda/Tauihi (375), Japón/B2 (407) y Portugal/LPB (74). Los ids se
+  hallaron con `descubrir_ligas.py`, que baja el listado completo de
+  API-Sports (1 petición) y busca por nombre.
+
+  > El feed **cambia a lo largo del día**: aparecen y desaparecen ligas según
+  > la hora. `cobertura_ligas.py --comprobar` es lo que avisa cuando entra una
+  > nueva, y `descubrir_ligas.py <texto>` halla su id en un minuto.
 
 - **Reserva de temporadas** (`historico.descargar_liga(--cubrir N)`): si con las
   temporadas pedidas no llegan las muestras, **sigue bajando temporadas
@@ -255,6 +260,28 @@ Lo que descartó la auditoría (por si se retoman):
   **total**: haría falta entrenar un modelo de margen nuevo.
 - **Apostar el lado contrario** si el nuestro está suspendido → sería jugar
   **contra** el propio modelo. Lo correcto es no apostar y avisar (ya hace).
+
+### 6.3 Historial de decisiones — `log/auto_apuestas.log`
+
+La interfaz solo puede enseñar **por qué** no apostó mientras el partido sigue
+en el descanso: al pasar al 3Q la fila desaparece y la respuesta se pierde.
+Para responder de forma permanente a "¿y por qué no ha apostado?", el bot deja
+una línea en `log/auto_apuestas.log` (excluido de git) en cada decisión:
+
+```
+2026-10-10 23:14:02  [nba_preseason] Dallas Mavericks - Chicago Bulls · entra en descanso 2Q→3Q · 1Q=26 2Q=35 línea=163.5 O=2.2 U=1.65 mercado=abierto
+2026-10-10 23:14:07  [nba_preseason] Dallas Mavericks - Chicago Bulls · APUESTA id=12 UNDER @ 1.65 línea=163.5 stake=10000 Δ=-6.6 EV=+10.9% modelo=NBA (n=1340)  ⚠RESPALDO
+2026-10-10 23:19:40  [spain/liga_acb] Joventut - Granada · NO apuesta: |Δ| 1.2 < 2.0
+2026-10-10 23:24:11  [germany/bbl] Bayern - Ulm · NO apuesta: OVER SUSPENDIDO por la casa
+```
+
+- Se anota la **entrada** en el descanso con el estado del mercado, la
+  **apuesta** con todos sus datos, o el **motivo** de no apostar.
+- Sin repeticiones: un mismo partido con el mismo motivo escribe **una sola
+  línea**, aunque el descanso dure 15 minutos y el bot sondee 180 veces.
+- Cada apuesta guarda en su `nota` qué modelo usó; si fue el de otra liga se
+  marca `⚠ modelo …` (y en el log, `⚠RESPALDO`).
+- El archivo se reinicia solo al superar 400 KB.
 
 
 
