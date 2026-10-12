@@ -37,6 +37,7 @@ import motor
 from historico import Muestra
 
 MINIMO_MUESTRAS = 30        # mínimo para publicar un modelo de una liga
+MINIMO_POOL = 8             # con menos muestras que esto no hay ni mezcla
 FRACCION_TEST = 0.2         # 20 % de las muestras se reserva para validar
 
 
@@ -167,9 +168,34 @@ def _entrenar_liga(liga: str, datos: list[tuple[float, float, float]],
 
 def entrenar_todo(minimo: int = MINIMO_MUESTRAS,
                   ligas: Optional[list[str]] = None) -> dict[str, motor.Modelo]:
-    """(Re)entrena el modelo de cada liga que tenga suficientes muestras."""
+    """
+    (Re)entrena el modelo de cada liga.
+
+    Tres niveles:
+      * liga con ≥ `minimo` muestras → modelo propio (holdout normal);
+      * liga con entre MINIMO_POOL y `minimo` muestras → MEZCLA con el modelo
+        global (pooling: peso n/(n+minimo) para lo propio), en vez de dejarla
+        sin modelo o con el de una liga ajena;
+      * con menos de MINIMO_POOL, se sigue sin publicar (respaldo en la app).
+    """
     disponibles = contar_muestras()
     entrenados: dict[str, motor.Modelo] = {}
+    global_m: object = None
+
+    def _global() -> Optional[motor.Modelo]:
+        """Modelo único entrenado con TODAS las muestras de todas las ligas."""
+        nonlocal global_m
+        if global_m is None:
+            todos: list[tuple[float, float, float]] = []
+            for l in disponibles:
+                todos.extend(leer_muestras(l))
+            if len(todos) >= 200:
+                g = motor._ajustar(todos, "global", "pooled")
+                global_m = g if (g and g.n and not g.errores) else False
+            else:
+                global_m = False
+        return global_m or None
+
     for liga, _n in disponibles.items():
         if ligas and liga not in ligas:
             continue
@@ -178,6 +204,10 @@ def entrenar_todo(minimo: int = MINIMO_MUESTRAS,
             continue        # dos rectas no definen un plano
         fechas = primer_ultimo(liga)
         m = _entrenar_liga(liga, datos, "muestras propias", minimo)
+        if m is None and len(datos) >= MINIMO_POOL:
+            g = _global()
+            if g is not None:
+                m = _entrenar_pooled(liga, datos, g, minimo)
         if m is None:
             continue
         m.fecha_min = _serial(fechas[0])
@@ -185,6 +215,51 @@ def entrenar_todo(minimo: int = MINIMO_MUESTRAS,
         _guardar_modelo(m)
         entrenados[liga] = m
     return entrenados
+
+
+def _entrenar_pooled(liga: str, datos: list[tuple[float, float, float]],
+                     global_m: motor.Modelo,
+                     minimo: int = MINIMO_MUESTRAS) -> Optional[motor.Modelo]:
+    """
+    Modelo de una liga con pocas muestras: mezcla del MCO propio con el GLOBAL.
+
+    Peso `w = n/(n+minimo)` para lo propio: con 8 muestras manda el global,
+    con 29 casi manda la liga. Es un pooling barato y mucho más honesto que
+    apostar con el modelo de otra liga (lo que hacía el respaldo: 0/3 hoy).
+    """
+    import math
+    w = len(datos) / (len(datos) + float(minimo))
+    local = motor._ajustar(datos, liga, "mezcla global (pocas muestras)")
+    if local.n == 0 or local.errores:
+        return None
+
+    m = motor.Modelo(liga=liga, origen="mezcla global (pocas muestras)",
+                     n=len(datos),
+                     b0=w * local.b0 + (1 - w) * global_m.b0,
+                     b1=w * local.b1 + (1 - w) * global_m.b1,
+                     b2=w * local.b2 + (1 - w) * global_m.b2,
+                     a0=w * local.a0 + (1 - w) * global_m.a0,
+                     a1=w * local.a1 + (1 - w) * global_m.a1)
+
+    # métricas sobre la propia muestra (no hay margen para holdout con n bajo)
+    err = [(y - m.predecir_dos(x1, x2)) for x1, x2, y in datos]
+    err_uno = [(y - m.predecir_uno(x1)) for x1, _, y in datos]
+    media = sum(y for _, _, y in datos) / len(datos)
+    sst = sum((y - media) ** 2 for _, _, y in datos) or 1.0
+    m.rmse_dos = math.sqrt(sum(e * e for e in err) / len(err))
+    m.rmse_uno = math.sqrt(sum(e * e for e in err_uno) / len(err_uno))
+    m.rmse_naive = math.sqrt(sum((y - x1 * 4.0) ** 2 for x1, _, y in datos)
+                             / len(datos))
+    m.r2_dos = 1 - sum(e * e for e in err) / sst
+    m.r2_uno = 1 - sum(e * e for e in err_uno) / sst
+    # sin holdout posible: el RMSE de muestra es lo más honesto que hay aquí
+    m.rmse_test_dos = m.rmse_dos
+    m.rmse_test_uno = m.rmse_uno
+    m.rmse_test_naive = m.rmse_naive
+    m.media_total = media
+    m.media_1q = sum(x1 for x1, _, _ in datos) / len(datos)
+    m.media_2q = sum(x2 for _, x2, _ in datos) / len(datos)
+    return m
 
 
 def _serial(f: Optional[date]) -> Optional[float]:

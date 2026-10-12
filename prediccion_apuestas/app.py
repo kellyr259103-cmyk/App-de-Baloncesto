@@ -19,7 +19,7 @@ import time
 import tkinter as tk
 from collections import Counter
 from datetime import datetime
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 
 import api_betplay
 import base_datos
@@ -58,6 +58,11 @@ F_PEQUE = ("Calibri", 9)
 
 RUTA_DEFECTO = motor.EXCEL_POR_DEFECTO
 STAKE_POR_DEFECTO = 10000
+# Piso de seguridad: un Δ pequeño convierte la apuesta en ruido (el margen de
+# la casa ~8-10 % exige ≥55 % de aciertos a cuota ~1.8). El backtest de
+# septiembre con Δ=0.5 lo confirmó: menos winrate con más volumen.
+UMBRAL_MINIMO = 2.0                 # Δ mínimo que la app permite usar
+EV_MINIMA = 0.0                     # EV mínimo que la app permite usar (%)
 INTERVALO_POR_DEFECTO = 5          # segundos entre pings automáticos
 UMBRAL_POR_DEFECTO = 2.0           # Δ mínimo (pts) para apostar solo en el descanso
 # Valor esperado mínimo. 0.0 = que la apuesta sea +EV con la cuota que ofrece
@@ -99,6 +104,17 @@ def exacto(v) -> str:
 
 def ahora_texto() -> str:
     return datetime.now().strftime("%H:%M:%S")
+
+
+def inicio_texto(iso: str) -> str:
+    """'start' de Kambi (ISO, UTC) → fecha y hora LOCAL 'dd/mm HH:MM' (o '')."""
+    if not iso:
+        return ""
+    try:
+        dt = datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+        return dt.astimezone().strftime("%d/%m %H:%M")
+    except (ValueError, TypeError):
+        return ""
 
 
 # ===========================================================================
@@ -349,19 +365,19 @@ class Pestana(ttk.Frame):
 class PestanaVivo(ttk.Frame):
     TODAS = "⚽ TODAS LAS LIGAS"
 
-    COLUMNAS = ("liga", "partido", "estado", "periodo", "reloj", "q1", "q2", "total",
-                "linea", "pred", "dif", "over", "under", "mercado")
+    COLUMNAS = ("inicio", "liga", "partido", "estado", "periodo", "reloj", "q1",
+                "q2", "total", "linea", "pred", "dif", "over", "under", "mercado")
 
     TITULOS = {
-        "liga": "Liga", "partido": "Partido", "estado": "Estado", "periodo": "Periodo",
-        "reloj": "Reloj", "q1": "1Q", "q2": "2Q", "total": "Total", "linea": "Linea",
-        "pred": "Pred.", "dif": "Δ", "over": "Over", "under": "Under",
-        "mercado": "Mercado",
+        "inicio": "Inicio", "liga": "Liga", "partido": "Partido", "estado": "Estado",
+        "periodo": "Periodo", "reloj": "Reloj", "q1": "1Q", "q2": "2Q",
+        "total": "Total", "linea": "Linea", "pred": "Pred.", "dif": "Δ",
+        "over": "Over", "under": "Under", "mercado": "Mercado",
     }
     ANCHOS = {
-        "liga": 150, "partido": 215, "estado": 82, "periodo": 88, "reloj": 60,
-        "q1": 40, "q2": 40, "total": 48, "linea": 55, "pred": 55, "dif": 55,
-        "over": 48, "under": 48, "mercado": 80,
+        "inicio": 88, "liga": 150, "partido": 215, "estado": 82, "periodo": 88,
+        "reloj": 60, "q1": 40, "q2": 40, "total": 48, "linea": 55, "pred": 55,
+        "dif": 55, "over": 48, "under": 48, "mercado": 80,
     }
 
     def __init__(self, master, app: "App"):
@@ -390,15 +406,29 @@ class PestanaVivo(ttk.Frame):
             value=bool(vivo.get("auto", self.var_auto_apostar.get())))
         self.var_intervalo = tk.IntVar(
             value=int(vivo.get("intervalo", INTERVALO_POR_DEFECTO)))
+        # filtro de la tabla: mostrar SOLO los partidos en el descanso 2Q→3Q
+        self.var_solo_descanso = tk.BooleanVar(
+            value=bool(vivo.get("filtro_descanso", False)))
         self._ventanas: dict[int, float] = {}      # evento_id -> marca al abrir
         self._apuestas_auto: set[int] = set()      # evento_id ya apostados
+        # señales ya registradas en `señales` (una por evento; evita una
+        # conexión por ping). Se marca tras el primer intento.
+        self._senales_registradas: set[int] = set()
         self._transitos: dict[int, tuple[str, float]] = {}  # para medir descansos
         self._motivos_auto: Counter = Counter()    # por qué NO se apuesta
         self._log_ya: set[tuple[int, str]] = set()  # no repetir en el log
+        # --- integridad de datos ---
+        # histórico de líneas/cuotas reales en `cuotas_historial`
+        self._cuotas_ultimas: dict[int, tuple] | None = None
+        # reconciliación periódica con el resultado oficial (API-Sports)
+        self._reconciliando = False
+        self._ultima_reconciliacion = 0.0
+        # partidos del último ping (para saber qué eventos ya no están)
+        self._eventos_feed: set[int] = set()
         self._construir()
         # guardar al cambiar cualquier control (van ya montados)
         for _v in (self.var_auto, self.var_intervalo, self.var_auto_apostar,
-                   self.var_umbral, self.var_ev_min):
+                   self.var_umbral, self.var_ev_min, self.var_solo_descanso):
             _v.trace_add("write", lambda *_a: self._guardar_vivo())
 
     # ------------------------------------------------------------------ UI
@@ -427,12 +457,20 @@ class PestanaVivo(ttk.Frame):
                           width=4, font=F_TEXTO)
         lbl_seg = tk.Label(self._top_a, text="seg", font=F_TEXTO)
 
+        # filtro: ver SOLO los partidos en el descanso 2Q→3Q (listos para
+        # apostar: 1Q y 2Q finales, ventana abierta). El número entre
+        # paréntesis es cuántos hay ahora mismo en el descanso.
+        self.chk_solo_descanso = tk.Checkbutton(
+            self._top_a, text="⏸ Solo descanso 2Q→3Q",
+            variable=self.var_solo_descanso, font=F_TEXTO,
+            command=self._poblar_tabla)
+
         self.lbl_ultima = tk.Label(self._top_b, text="aún sin consultar",
                                    font=F_PEQUE, fg=C_SUB_FG)
         self.lbl_ping_estado = tk.Label(self._top_b, text="", font=F_PEQUE, fg=C_SUB_FG)
 
         self._controles = [lbl_liga, self.combo_liga, self.btn_ping,
-                           self.chk_auto, spin, lbl_seg]
+                           self.chk_auto, spin, lbl_seg, self.chk_solo_descanso]
         self._estado = [self.lbl_ultima, self.lbl_ping_estado]
         self._top_modo = None
         self._top.bind("<Configure>", self._repack_top)
@@ -697,6 +735,9 @@ class PestanaVivo(ttk.Frame):
         self.lbl_ping_estado.config(
             text=f"{len(partidos)} partidos · {vivos} en vivo · {liga_txt}", fg=C_SUB_FG)
         self._poblar_tabla()
+        # histórico de líneas/cuotas reales (base para backtests honestos)
+        self._eventos_feed = {p.evento_id for p in partidos}
+        self._registrar_cuotas(partidos)
         # guardar los partidos acabados con sus cuartos (muestras de entrenamiento)
         self.recolectar_en_hilo(partidos)
         # resolver automáticamente las apuestas pendientes de partidos terminados
@@ -708,6 +749,11 @@ class PestanaVivo(ttk.Frame):
             self.app.refrescar_apuestas()
         # apuesta automática en el descanso 2Q→3Q (si está activada)
         self._auto_apostar_en_descanso(partidos)
+        # reconciliación oficial cada ~10 min: cierra las colgadas (evento
+        # desaparecido del feed) y corrige totales con el resultado real.
+        if time.time() - self._ultima_reconciliacion > 600:
+            self._ultima_reconciliacion = time.time()
+            self._reconciliar_en_hilo()
         # reseleccionar el partido que estábamos mirando
         if self._partido_sel is not None:
             for p in partidos:
@@ -737,8 +783,19 @@ class PestanaVivo(ttk.Frame):
         seleccion = self.tree.selection()
         self.tree.delete(*self.tree.get_children())
 
+        solo = bool(self.var_solo_descanso.get())
+        en_break = sum(1 for p in self.partidos if p.en_descanso_2q)
+        try:
+            self.chk_solo_descanso.config(
+                text=f"⏸ Solo descanso 2Q→3Q ({en_break})")
+        except tk.TclError:
+            pass
+
         filas = []
         for p in self.partidos:
+            if solo and not p.en_descanso_2q:
+                continue        # filtro: solo los que están en el descanso
+
             res = self._prediccion_de(p)
 
             if p.finalizado:
@@ -755,8 +812,14 @@ class PestanaVivo(ttk.Frame):
                 marca = self._ventanas.get(p.evento_id)
                 restantes = (descansos.duracion_descanso(p.clave_liga)
                              - (descansos.minutos_desde(marca) or 0.0))
-                periodo = ("DESCANSO 2Q" if restantes <= 0
-                           else f"DESCANSO 2Q ({restantes:.0f}′)")
+                try:
+                    listo, _motivo = descansos.puede_apostar(p, p.clave_liga,
+                                                             marca)
+                except Exception:  # noqa: BLE001
+                    listo = False
+                periodo = (("DESCANSO 2Q" if restantes <= 0
+                            else f"DESCANSO 2Q ({restantes:.0f}′)")
+                           + (" · LISTO" if listo else ""))
             else:
                 periodo = p.periodo or "—"
             if not p.mercado_abierto:
@@ -767,6 +830,7 @@ class PestanaVivo(ttk.Frame):
                 mercado = "ABIERTO"
 
             valores = (
+                inicio_texto(p.inicio) or "—",
                 p.liga_nombre or "—",
                 p.nombre, estado, periodo, reloj,
                 p.q1 if p.q1 is not None else "—",
@@ -908,11 +972,11 @@ class PestanaVivo(ttk.Frame):
         except (ValueError, tk.TclError):
             intervalo = INTERVALO_POR_DEFECTO
         try:
-            umbral = float(self.var_umbral.get())
+            umbral = max(UMBRAL_MINIMO, float(self.var_umbral.get()))
         except (ValueError, tk.TclError):
             umbral = UMBRAL_POR_DEFECTO
         try:
-            ev_min = float(self.var_ev_min.get())
+            ev_min = max(EV_MINIMA, float(self.var_ev_min.get()))
         except (ValueError, tk.TclError):
             ev_min = EV_MINIMA_POR_DEFECTO
         try:
@@ -923,6 +987,7 @@ class PestanaVivo(ttk.Frame):
                 "auto_apostar": bool(self.var_auto_apostar.get()),
                 "umbral": umbral,
                 "ev_min": ev_min,
+                "filtro_descanso": bool(self.var_solo_descanso.get()),
             }
             base_datos.guardar_config(cfg)
         except Exception:   # noqa: BLE001  (guardar la preferencia no puede romper la app)
@@ -938,6 +1003,12 @@ class PestanaVivo(ttk.Frame):
         """
         self.var_intervalo.set(5)
         self.var_auto_apostar.set(True)
+        # pisos de seguridad: Δ y EV por debajo de esto son apuestas de ruido
+        # (el margen de la casa ~8-10 % se come cualquier ventaja mínima).
+        if self.var_umbral.get() < UMBRAL_MINIMO:
+            self.var_umbral.set(UMBRAL_MINIMO)
+        if self.var_ev_min.get() < EV_MINIMA:
+            self.var_ev_min.set(EV_MINIMA)
         self.toggle_auto_apostar()      # pone el texto, el aviso y el sondeo
 
     def toggle_auto_apostar(self) -> None:
@@ -989,13 +1060,28 @@ class PestanaVivo(ttk.Frame):
         if not self.var_auto_apostar.get():
             return
         try:
-            umbral = float(self.var_umbral.get())
+            umbral = max(UMBRAL_MINIMO, float(self.var_umbral.get()))
         except (ValueError, tk.TclError):
             umbral = UMBRAL_POR_DEFECTO
         try:
-            ev_min = float(self.var_ev_min.get()) / 100.0   # el control va en %
+            ev_min = max(EV_MINIMA, float(self.var_ev_min.get())) / 100.0   # el control va en %
         except (ValueError, tk.TclError):
             ev_min = EV_MINIMA_POR_DEFECTO / 100.0
+        # Política (config.json -> "auto"): las ligas con modelo de RESPALDO
+        # apostaron 0/3 hoy (modelo de otra liga); por defecto no se usan y
+        # `ligas_validadas` (si tiene elementos) restringe a la lista blanca.
+        try:
+            cfg_auto = base_datos.cargar_config().get("auto", {}) or {}
+        except Exception:   # noqa: BLE001 (leer la política no rompe el bot)
+            cfg_auto = {}
+        solo_propio = bool(cfg_auto.get("solo_modelo_propio", True))
+        ligas_validadas = cfg_auto.get("ligas_validadas") or []
+        # Si >0: solo se apuesta dentro de los primeros N segundos del descanso
+        # (capturar la línea "congelada" antes de que la casa la re-afine).
+        try:
+            max_retraso = int(cfg_auto.get("max_retraso_seg", 0) or 0)
+        except (TypeError, ValueError):
+            max_retraso = 0
 
         en_descanso = 0
         apostadas = 0
@@ -1035,12 +1121,10 @@ class PestanaVivo(ttk.Frame):
                          f"mercado={'abierto' if p.mercado_abierto else 'cerrado'}")
             marca = self._ventanas[p.evento_id]
 
-            ok, motivo = descansos.puede_apostar(p, p.clave_liga, marca)
-            if not ok:
-                rechazar(p, motivo)
-                continue
-            if p.evento_id in self._apuestas_auto:
-                continue            # ya apostado en este partido
+            # --- modelo y predicción (se calculan ANTES de los filtros de
+            # mercado/caducidad para poder REGISTRAR LA SEÑAL aunque la casa
+            # tenga el mercado suspendido o falte la línea; la decisión de
+            # apostar NO cambia: esos filtros se siguen aplicando después). --
             # MISMO modelo que muestra la interfaz (`_modelo_de`): el de la
             # propia liga o, si esa liga aún no tiene suficientes partidos,
             # el del Excel (NBA/EUROLIGA). Antes se miraba solo
@@ -1059,6 +1143,54 @@ class PestanaVivo(ttk.Frame):
                                float(p.linea))
             except Exception as exc:        # noqa: BLE001
                 rechazar(p, f"el modelo no pudo predecir ({exc})")
+                continue
+
+            # Retraso desde la primera vez que vimos el descanso (o desde el
+            # reinicio de la app).
+            retraso = int(max(0.0, ahora - marca))
+
+            # --- REGISTRO DE SEÑAL (todas las del descanso con modelo,
+            # apostadas o no, incluidas las SIN dirección clara y las que
+            # están sin línea o con mercado suspendido). El set en memoria
+            # evita una conexión por ping; se marca tras el primer intento,
+            # tenga éxito o no. Silencioso por diseño: un fallo de registro
+            # JAMÁS interrumpe al bot. ---
+            if p.evento_id not in self._senales_registradas:
+                self._senales_registradas.add(p.evento_id)
+                try:
+                    base_datos.guardar_senal(
+                        p, res, retraso,
+                        "respaldo" if es_fallback else "propio")
+                except Exception:   # noqa: BLE001
+                    pass
+
+            # --- filtros de la lógica de apuesta (mismo orden de siempre) ---
+            ok, motivo = descansos.puede_apostar(p, p.clave_liga, marca)
+            if not ok:
+                rechazar(p, motivo)
+                continue
+            if max_retraso and retraso > max_retraso:
+                rechazar(p, f"descanso ya avanzado "
+                            f"(+{retraso}s > {max_retraso}s)")
+                continue
+            if p.evento_id in self._apuestas_auto:
+                continue            # ya apostado en este partido (memoria)
+            # Candado PERSISTENTE: sobrevive a reinicios de la app. El set de
+            # memoria se pierde al reiniciar y el bot repetía la apuesta si el
+            # partido seguía en su descanso de ~15 min (duplicados de hoy).
+            try:
+                ya_guardada = base_datos.existe_apuesta(p.evento_id)
+            except base_datos.ErrorBaseDatos:
+                ya_guardada = False
+            if ya_guardada:
+                self._apuestas_auto.add(p.evento_id)
+                rechazar(p, "ya hay una apuesta guardada de este partido")
+                continue
+            if es_fallback and solo_propio:
+                rechazar(p, "modelo de respaldo (modo solo modelo propio)")
+                continue
+            if ligas_validadas and (p.clave_liga or "") not in ligas_validadas:
+                rechazar(p, f"liga fuera de las validadas ({p.clave_liga})")
                 continue
             if res.veredicto not in ("OVER", "UNDER"):
                 rechazar(p, "veredicto sin decidir")
@@ -1112,7 +1244,7 @@ class PestanaVivo(ttk.Frame):
                 estado=paperbet.ESTADO_PENDIENTE,
                 nota=(f"AUTO descanso2Q ({p.clave_liga}): "
                       f"1Q={p.q1:.0f} 2Q={p.q2:.0f} Δ={res.diferencia:+.1f} "
-                      f"EV={esperado * 100:+.1f}%"
+                      f"EV={esperado * 100:+.1f}% · +{retraso}s"
                       # deja constancia de si se usó el modelo de otra liga
                       + (f" · ⚠ modelo {etiqueta}" if es_fallback else "")),
             )
@@ -1127,6 +1259,8 @@ class PestanaVivo(ttk.Frame):
                 self.lbl_auto_estado.config(
                     text=f"AUTO: error al guardar ({exc})", fg=C_ROJO_FG)
                 return
+            # enlaza la señal registrada con la apuesta tomada (si falla, no pasa nada)
+            base_datos.vincular_apuesta(p.evento_id, id_apuesta)
             self._apuestas_auto.add(p.evento_id)
             apostadas += 1
             log_auto(f"[{p.clave_liga}] {p.nombre[:44]} · APUESTA id={id_apuesta} "
@@ -1381,6 +1515,76 @@ class PestanaVivo(ttk.Frame):
         except base_datos.ErrorBaseDatos:
             return 0
 
+    # ------------------------------------------------ cuotas reales / cierre
+    def _registrar_cuotas(self, partidos) -> None:
+        """
+        Guarda en `cuotas_historial` los cambios de línea/cuotas reales.
+
+        Es la base para backtests honestos (no existe histórico de cuotas de
+        la casa): una fila por cambio de línea/cuotas/periodo y otra de cierre
+        cuando el partido termina, con el total final visto en el feed.
+        """
+        if self._cuotas_ultimas is None:
+            try:
+                self._cuotas_ultimas = base_datos.ultimas_cuotas()
+            except base_datos.ErrorBaseDatos:
+                return
+        filas = []
+        for p in partidos:
+            termino = bool(p.finalizado)
+            total = (float(p.total_final)
+                     if termino and p.total_final is not None else None)
+            en_descanso = bool(p.en_descanso_2q)
+            clave = (p.linea, p.cuota_over, p.cuota_under, p.period_id or "",
+                     termino, total, en_descanso)
+            anterior = self._cuotas_ultimas.get(p.evento_id)
+            if anterior is not None and tuple(anterior) == clave:
+                continue                      # sin cambios: no se toca la BD
+            self._cuotas_ultimas[p.evento_id] = clave
+            filas.append((
+                p.evento_id, p.clave_liga or "", p.nombre,
+                p.linea, p.cuota_over, p.cuota_under, p.period_id or "",
+                f"{p.reloj_min}:{p.reloj_seg:02d}" if p.es_vivo else "",
+                termino, total, en_descanso))
+        if filas:
+            try:
+                base_datos.guardar_cuotas(filas)
+            except base_datos.ErrorBaseDatos:
+                pass
+
+    def _reconciliar_en_hilo(self) -> None:
+        """Cierra/corrige apuestas con el resultado OFICIAL (hilo aparte)."""
+        if self._reconciliando:
+            return
+        self._reconciliando = True
+        eventos = set(self._eventos_feed)
+
+        def tarea():
+            import reconciliacion as rec
+            n = rec.reconciliar(horas=48.0, minimo_edad_horas=2.0,
+                                sin_en_feed=eventos, log=log_auto)
+            # completa cierre (linea_3q_5min, linea_cierre) y resultado de
+            # las señales registradas; idempotente y silencioso
+            try:
+                base_datos.cerrar_senales()
+            except Exception:   # noqa: BLE001
+                pass
+            return n
+
+        def al_terminar(res):
+            self._reconciliando = False
+            if isinstance(res, Exception):
+                log_auto(f"reconciliacion: {res}")
+                return
+            if not res:
+                return
+            self.app.refrescar_apuestas()
+            self.lbl_ping_estado.config(
+                text=f"{res} apuesta(s) cerrada(s)/corregida(s) con el "
+                     f"resultado oficial de API-Sports", fg=C_VERDE)
+
+        self.app.en_hilo(tarea, al_terminar)
+
     def _resolver_con(self, partidos) -> int:
         pendientes = base_datos.apuestas_pendientes()
         if not pendientes:
@@ -1402,15 +1606,17 @@ class PestanaVivo(ttk.Frame):
 # ===========================================================================
 class PestanaApuestas(ttk.Frame):
     COLUMNAS = ("id", "fecha", "partido", "sel", "linea", "cuota", "stake",
-                "pred", "modelo", "estado", "total", "beneficio")
+                "pred", "delta", "modelo", "estado", "total", "beneficio")
     TITULOS = {
         "id": "#", "fecha": "Fecha", "partido": "Partido", "sel": "Sel.",
         "linea": "Línea", "cuota": "Cuota", "stake": "Stake", "pred": "Pred.",
-        "modelo": "Modelo", "estado": "Estado", "total": "Total final", "beneficio": "Beneficio",
+        "delta": "Δ", "modelo": "Modelo", "estado": "Estado",
+        "total": "Total final", "beneficio": "Beneficio",
     }
     ANCHOS = {
         "id": 45, "fecha": 125, "partido": 245, "sel": 62, "linea": 55, "cuota": 55,
-        "stake": 75, "pred": 55, "modelo": 78, "estado": 85, "total": 70, "beneficio": 85,
+        "stake": 75, "pred": 55, "delta": 55, "modelo": 78, "estado": 85,
+        "total": 70, "beneficio": 85,
     }
 
     def __init__(self, master, app: "App"):
@@ -1474,6 +1680,10 @@ class PestanaApuestas(ttk.Frame):
             side="left", padx=(0, 6))
         tk.Button(botones, text="🗑 Eliminar seleccionada", font=F_TEXTO, width=20,
                   command=self.eliminarSeleccionada).pack(side="left", padx=(0, 6))
+        tk.Button(botones, text="✍ Liquidar manual...", font=F_TEXTO, width=18,
+                  command=self.liquidarManual).pack(side="left", padx=(0, 6))
+        tk.Button(botones, text="📄 Exportar CSV", font=F_TEXTO, width=16,
+                  command=self.exportarCSV).pack(side="left", padx=(0, 6))
         self.lbl_bd = tk.Label(botones, text="", font=F_PEQUE, fg=C_SUB_FG)
         self.lbl_bd.pack(side="right")
 
@@ -1509,7 +1719,9 @@ class PestanaApuestas(ttk.Frame):
             tag = {"GANADA": "ganada", "PERDIDA": "perdida"}.get(a.estado, "pendiente")
             self.tree.insert("", "end", iid=str(a.id), tags=(tag,), values=(
                 a.id, fecha, a.partido, a.seleccion, f1(a.linea), f"{a.cuota:.2f}",
-                f"{a.stake:,.0f}", f1(a.prediccion), a.liga_modelo, a.estado,
+                f"{a.stake:,.0f}", f1(a.prediccion),
+                "" if a.diferencia is None else f"{a.diferencia:+.1f}",
+                a.liga_modelo, a.estado,
                 "" if a.total_final is None else f1(a.total_final),
                 "" if a.beneficio is None else f"{a.beneficio:+,.0f}",
             ))
@@ -1535,6 +1747,640 @@ class PestanaApuestas(ttk.Frame):
             return
         self.refrescar()
 
+    def liquidarManual(self) -> None:
+        """
+        Cierra (o corrige) una apuesta a mano con el total final real.
+
+        Para los partidos que ni el feed ni API-Sports pueden cerrar (ligas
+        sin datos oficiales): se escribe el total y la app recalcula el
+        resultado y el dinero con la misma fórmula de siempre.
+        """
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showinfo("Nada seleccionado",
+                                "Selecciona una apuesta de la lista.")
+            return
+        apuesta_id = int(sel[0])
+        total = simpledialog.askfloat(
+            "Liquidar manualmente",
+            f"Total final real del partido de la apuesta #{apuesta_id}:",
+            minvalue=0.0, maxvalue=500.0)
+        if total is None:
+            return
+        try:
+            a = next((x for x in base_datos.listar_apuestas() if x.id == apuesta_id),
+                     None)
+            if a is None:
+                return
+            if a.estado == paperbet.ESTADO_PENDIENTE:
+                paperbet.resolver(a, total)
+            else:
+                paperbet.recalcular(a, total)
+            a.nota = (a.nota or "") + " [liquidada a mano]"
+            base_datos.actualizar_resultado(a)
+            base_datos.marcar_verificado(a.id)
+        except base_datos.ErrorBaseDatos as exc:
+            messagebox.showerror("Error", str(exc))
+            return
+        self.refrescar()
+
+    def exportarCSV(self) -> None:
+        """
+        Exporta la tabla de APUESTAS a CSV (tal como se ve, cabeceras incluidas).
+
+        Delimitador ';' y BOM UTF-8 para que Excel en español abra el archivo
+        con tildes y columnas correctas al doble clic. El orden y el formato de
+        cada celda es el mismo que muestra la tabla (respeta lo visible).
+        """
+        filas = self.tree.get_children()
+        if not filas:
+            messagebox.showinfo("Nada que exportar",
+                                "La tabla de apuestas está vacía.")
+            return
+        ruta = filedialog.asksaveasfilename(
+            title="Exportar apuestas a CSV",
+            defaultextension=".csv",
+            initialfile=f"apuestas_{datetime.now():%Y-%m-%d_%H%M}.csv",
+            filetypes=[("CSV (Excel)", "*.csv"), ("Todos los archivos", "*.*")])
+        if not ruta:
+            return
+        try:
+            import csv
+            with open(ruta, "w", newline="", encoding="utf-8-sig") as fh:
+                escritor = csv.writer(fh, delimiter=";")
+                escritor.writerow([self.TITULOS[c] for c in self.COLUMNAS])
+                for iid in filas:
+                    escritor.writerow(self.tree.item(iid, "values"))
+        except OSError as exc:
+            messagebox.showerror("Error al exportar", str(exc))
+            return
+        self.lbl_bd.config(
+            text=f"CSV exportado: {len(filas)} filas → {ruta}", fg=C_VERDE)
+        messagebox.showinfo("Exportado",
+                            f"{len(filas)} apuestas exportadas a:\n{ruta}")
+
+
+# ===========================================================================
+#  Pestaña GRÁFICO — dispersión: predicción vs total final (año en curso)
+# ===========================================================================
+def datos_dispersion() -> dict:
+    """
+    Datos de los gráficos del año en curso (una sola carga para todo el panel):
+
+      * partidos: [(liga, fecha, pred, final, proxy, sigma)] — TODOS los
+        partidos del año con modelo de liga. `proxy` = 2·(q1+q2), la línea de
+        referencia del descanso para la calibración, y `sigma` = el RMSE del
+        modelo de su liga (el que usa Φ(Δ/σ)).
+      * apuestas: (predicción en vivo, total final, estado).
+    """
+    import modelos as mod_modelos
+    anio = datetime.now().year
+    conn = base_datos.conectar()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT liga, fecha, q1, q2, total FROM muestras "
+                "WHERE fecha >= %s", (datetime(anio, 1, 1).date(),))
+            filas = cur.fetchall()
+    finally:
+        conn.close()
+    modelos = mod_modelos.cargar_modelos()
+    partidos = []
+    sin_modelo = 0
+    for liga, fecha, q1, q2, total in filas:
+        m = modelos.get(liga)
+        if m is None or not m.n:
+            sin_modelo += 1
+            continue
+        pred = m.predecir_dos(float(q1), float(q2))
+        proxy = 2.0 * (float(q1) + float(q2))
+        sigma = m.rmse_test_dos or m.rmse_dos or 0.0
+        partidos.append((liga, fecha, pred, float(total), proxy, sigma))
+    apuestas = base_datos.listar_apuestas()
+    puntos = [(a.prediccion, a.total_final, a.estado)
+              for a in apuestas
+              if a.prediccion is not None and a.total_final is not None]
+    pendientes = sum(1 for a in apuestas if a.total_final is None)
+    return {"anio": anio, "partidos": partidos, "apuestas": puntos,
+            "pendientes": pendientes, "sin_modelo": sin_modelo}
+
+
+def calcular_graficos(d: dict) -> dict:
+    """
+    Cálculos de los 6 gráficos (una vez por refresco, en hilo aparte):
+
+      * residuo: [(pred, total−pred)] y media móvil por tramos de predicción;
+      * por liga: (n, RMSE, sesgo, IC95% del sesgo) con n ≥ 30 (muestra
+        suficiente); las de menos n solo se cuentan;
+      * por mes: RMSE y sesgo con IC;
+      * calibración (línea proxy 2·(q1+q2), lado elegido): bins de
+        Φ(Δ/σ) vs frecuencia real, ECE y Brier;
+      * histograma de residuos + σ usada por Φ vs σ real.
+    """
+    import math
+    from collections import defaultdict
+
+    P = d["partidos"]
+    out: dict = {}
+
+    # ---------- residuos + media móvil ----------
+    resid = [(p, t - p) for _l, _f, p, t, _x, _s in P]
+    out["residuo"] = resid
+    ma = []
+    if P:
+        lo = min(t[2] for t in P)
+        hi = max(t[2] for t in P)
+        nb = 18
+        ancho = (hi - lo) / nb if hi > lo else 1.0
+        bins: dict = defaultdict(list)
+        for _l, _f, p, t, _x, _s in P:
+            i = min(nb - 1, max(0, int((p - lo) / ancho)))
+            bins[i].append(t - p)
+        for i in sorted(bins):
+            v = bins[i]
+            if len(v) >= 20:
+                ma.append((lo + (i + 0.5) * ancho, sum(v) / len(v), len(v)))
+    out["ma"] = ma
+    out["rango"] = ((min(t[2] for t in P), max(t[2] for t in P)) if P else (0, 1))
+
+    # ---------- por liga (n>=30) ----------
+    acum: dict = defaultdict(lambda: [0.0, 0.0, 0])
+    for l, _f, p, t, _x, _s in P:
+        e = t - p
+        a = acum[l]
+        a[0] += e
+        a[1] += e * e
+        a[2] += 1
+    ligas = []
+    for l, (s, s2, n) in acum.items():
+        if n < 30:
+            continue
+        rmse = math.sqrt(s2 / n)
+        sesgo = s / n
+        var = max(0.0, s2 / n - sesgo * sesgo)
+        ic = 1.96 * math.sqrt(var / n)
+        ligas.append((l, n, rmse, sesgo, ic))
+    ligas.sort(key=lambda x: -x[2])
+    out["ligas"] = ligas
+    out["ligas_cortas"] = sum(1 for v in acum.values() if v[2] < 30)
+
+    # ---------- por mes ----------
+    pm: dict = defaultdict(lambda: [0.0, 0.0, 0])
+    for _l, f, p, t, _x, _s in P:
+        e = t - p
+        a = pm[(f.year, f.month)]
+        a[0] += e
+        a[1] += e * e
+        a[2] += 1
+    meses = []
+    for (y, m), (s, s2, n) in sorted(pm.items()):
+        rmse = math.sqrt(s2 / n)
+        sesgo = s / n
+        var = max(0.0, s2 / n - sesgo * sesgo)
+        meses.append((f"{m:02d}/{str(y)[2:]}", n, rmse, sesgo,
+                      1.96 * math.sqrt(var / n)))
+    out["meses"] = meses
+
+    # ---------- calibración (proxy 2·(q1+q2), lado elegido) ----------
+    def phi(z):
+        return 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))
+
+    bins_cal = [[0.0, 0.0, 0] for _ in range(10)]     # sum_p, aciertos, n
+    brier = 0.0
+    ncal = 0
+    for _l, _f, p, t, proxy, s in P:
+        if not s or t == proxy:
+            continue
+        dlt = p - proxy
+        prob = phi(abs(dlt) / s)
+        ok = (t > proxy) == (dlt >= 0)
+        i = min(9, max(0, int((prob - 0.5) * 20)))
+        b = bins_cal[i]
+        b[0] += prob
+        b[1] += 1.0 if ok else 0.0
+        b[2] += 1
+        brier += (prob - (1.0 if ok else 0.0)) ** 2
+        ncal += 1
+    cal = [(b[0] / b[2], b[1] / b[2], b[2]) for b in bins_cal if b[2] > 0]
+    ece = sum((n / ncal) * abs(pp - fr) for pp, fr, n in cal) if ncal else 0.0
+    out["cal"] = {"bins": cal, "ece": ece,
+                  "brier": (brier / ncal) if ncal else 0.0, "n": ncal}
+
+    # ---------- histograma de residuos ----------
+    hist: dict = defaultdict(int)
+    for _p, e in resid:
+        clave = int(round(e / 2.0)) * 2          # bins de 2 puntos
+        if -80 <= clave <= 80:
+            hist[clave] += 1
+    n = len(resid)
+    media = sum(e for _p, e in resid) / n if n else 0.0
+    var = sum((e - media) ** 2 for _p, e in resid) / n if n else 1.0
+    sd = math.sqrt(var) if var > 0 else 1.0
+    sigma_ref = (sum(t[5] for t in P) / len(P)) if P else 0.0
+    p2 = (sum(1 for _p, e in resid if abs(e) > 2 * sd) / n) if n else 0.0
+    out["hist"] = {"bins": sorted(hist.items()), "media": media, "sd": sd,
+                   "n": n, "sigma_ref": sigma_ref, "p2": p2}
+    return out
+
+
+class PestanaGrafico(ttk.Frame):
+    """Panel de gráficos con subpestañas (todo canvas puro, sin dependencias)."""
+
+    def __init__(self, master, app: "App"):
+        super().__init__(master, padding=10)
+        self.app = app
+        self._datos: dict | None = None
+        self._calc: dict | None = None
+        self._tam: dict = {}
+        self._cargando = False
+        self._construir()
+
+    def _construir(self) -> None:
+        top = tk.Frame(self)
+        top.pack(fill="x", pady=(0, 6))
+        tk.Label(top, text="GRÁFICOS — modelo vs realidad (todo el año)",
+                 font=F_TITULO, bg=C_TITULO_BG, fg=C_TITULO_FG, anchor="w",
+                 padx=10, pady=4).pack(fill="x")
+
+        barra = tk.Frame(self)
+        barra.pack(fill="x", pady=(0, 4))
+        tk.Button(barra, text="🔄 Actualizar", font=F_TEXTO, width=14,
+                  command=self.refrescar).pack(side="left", padx=(0, 8))
+        self.lbl_nube = tk.Label(barra, text="", font=F_PEQUE, fg=C_SUB_FG)
+        self.lbl_nube.pack(side="left", padx=(0, 12))
+        self.lbl_apuestas = tk.Label(barra, text="", font=F_PEQUE, fg=C_SUB_FG)
+        self.lbl_apuestas.pack(side="left")
+
+        self.sub = ttk.Notebook(self)
+        self.sub.pack(fill="both", expand=True)
+        self.canvas_disp = self._sub("Dispersión")
+        self.canvas_res = self._sub("Residuo vs pred")
+        self.canvas_ligas = self._sub("Error por liga")
+        self.canvas_mes = self._sub("Error por mes")
+        self.canvas_cal = self._sub("Calibración")
+        self.canvas_hist = self._sub("Histograma")
+
+    def _sub(self, titulo: str) -> tk.Canvas:
+        marco = tk.Frame(self.sub)
+        self.sub.add(marco, text=f"  {titulo}  ")
+        c = tk.Canvas(marco, bg="white", highlightthickness=1,
+                      highlightbackground="#CFD8DC")
+        c.pack(fill="both", expand=True)
+        c.bind("<Configure>", lambda _e, cc=c: self._al_redimensionar(cc))
+        return c
+
+    # ------------------------------------------------------------- datos
+    def refrescar(self) -> None:
+        if self._cargando:
+            return
+        self._cargando = True
+        self.lbl_nube.config(text="cargando…", fg=C_SUB_FG)
+
+        def tarea():
+            d = datos_dispersion()
+            return d, calcular_graficos(d)
+
+        def al_terminar(res):
+            self._cargando = False
+            if isinstance(res, Exception):
+                self.lbl_nube.config(text=f"Error: {res}", fg=C_ROJO_FG)
+                return
+            self._datos, self._calc = res
+            self._actualizar_resumen()
+            self._dibujar_todo()
+
+        self.app.en_hilo(tarea, al_terminar)
+
+    @staticmethod
+    def _stats(pares) -> str:
+        import math
+        n = len(pares)
+        if not n:
+            return "n=0"
+        errs = [p - f for p, f in pares]
+        rmse = math.sqrt(sum(e * e for e in errs) / n)
+        mae = sum(abs(e) for e in errs) / n
+        sesgo = sum(errs) / n
+        return (f"n={n:,} · RMSE {rmse:.1f} · MAE {mae:.1f} · "
+                f"sesgo {sesgo:+.1f}")
+
+    def _actualizar_resumen(self) -> None:
+        d = self._datos
+        self.lbl_nube.config(
+            text=(f"Partidos {d['anio']}: "
+                  f"{self._stats([(t[2], t[3]) for t in d['partidos']])} "
+                  f"(sin modelo: {d['sin_modelo']:,})"),
+            fg=C_SUB_FG)
+        self.lbl_apuestas.config(
+            text=(f"Apuestas: "
+                  f"{self._stats([(pr, f) for pr, f, _e in d['apuestas']])} "
+                  f"· pendientes sin total: {d['pendientes']}"),
+            fg=C_SUB_FG)
+
+    # ------------------------------------------------------------- dibujo
+    def _pares_dibujo(self):
+        return ((self.canvas_disp, self._dibujar_disp),
+                (self.canvas_res, self._dibujar_res),
+                (self.canvas_ligas, self._dibujar_ligas),
+                (self.canvas_mes, self._dibujar_mes),
+                (self.canvas_cal, self._dibujar_cal),
+                (self.canvas_hist, self._dibujar_hist))
+
+    def _al_redimensionar(self, c: tk.Canvas, _e=None) -> None:
+        tam = (c.winfo_width(), c.winfo_height())
+        if tam != self._tam.get(c):
+            self._tam[c] = tam
+            if self._calc:
+                for cc, fn in self._pares_dibujo():
+                    if cc is c:
+                        try:
+                            fn(cc)
+                        except Exception:   # noqa: BLE001
+                            pass
+                        break
+
+    def _dibujar_todo(self) -> None:
+        if not self._calc:
+            return
+        for c, fn in self._pares_dibujo():
+            try:
+                fn(c)
+            except Exception:   # noqa: BLE001 — un gráfico no tumba el panel
+                continue
+
+    def _dibujar_disp(self, c) -> None:
+        import math
+        c.delete("all")
+        d = self._datos
+        W, H = c.winfo_width(), c.winfo_height()
+        if not d or W < 80 or H < 80:
+            return
+        x0, x1, y0, y1 = 52, W - 16, H - 52, 18
+        todos = ([t[2] for t in d["partidos"]] + [t[3] for t in d["partidos"]]
+                 + [v for pr, f, _e in d["apuestas"] for v in (pr, f)])
+        if not todos:
+            return
+        lo = math.floor(min(todos) / 20) * 20
+        hi = math.ceil(max(todos) / 20) * 20
+        px = lambda v: x0 + (v - lo) / (hi - lo) * (x1 - x0)
+        py = lambda v: y0 - (v - lo) / (hi - lo) * (y0 - y1)
+        paso = 20 if (hi - lo) <= 240 else 40
+        for v in range(int(lo), int(hi) + 1, paso):
+            c.create_line(px(v), y0, px(v), y1, fill="#ECEFF1")
+            c.create_line(x0, py(v), x1, py(v), fill="#ECEFF1")
+            c.create_text(px(v), y0 + 11, text=str(v), font=F_PEQUE, fill=C_SUB_FG)
+            c.create_text(x0 - 16, py(v), text=str(v), font=F_PEQUE, fill=C_SUB_FG)
+        c.create_line(px(lo), py(lo), px(hi), py(hi), fill="#90A4AE", dash=(5, 3))
+        c.create_text(px(hi) - 6, py(hi) + 10, text="y = x", anchor="e",
+                      font=F_PEQUE, fill="#90A4AE")
+        for _l, _f, pr, f, _x, _s in d["partidos"]:
+            c.create_oval(px(pr) - 2, py(f) - 2, px(pr) + 2, py(f) + 2,
+                          fill="#CFD8DC", outline="")
+        colores = {"GANADA": C_VERDE, "PERDIDA": C_ROJO_FG, "ANULADA": "#F9A825"}
+        for pr, f, e in d["apuestas"]:
+            colr = colores.get(e, C_AZUL)
+            c.create_oval(px(pr) - 4, py(f) - 4, px(pr) + 4, py(f) + 4,
+                          fill=colr, outline="#FFFFFF", width=1)
+        c.create_text((x0 + x1) // 2, H - 14,
+                      text="Predicción del modelo (total)", font=F_LABEL)
+        c.create_text(14, (y0 + y1) // 2, text="Total final", angle=90,
+                      font=F_LABEL)
+        lx, ly = x1 - 150, y1 + 4
+        for texto, color in (("partidos del año", "#CFD8DC"),
+                             ("apuestas ganadas", C_VERDE),
+                             ("apuestas perdidas", C_ROJO_FG),
+                             ("anuladas (push)", "#F9A825")):
+            c.create_oval(lx, ly + 3, lx + 8, ly + 11, fill=color, outline="")
+            c.create_text(lx + 12, ly + 7, text=texto, anchor="w",
+                          font=F_PEQUE, fill=C_SUB_FG)
+            ly += 14
+
+    def _dibujar_res(self, c) -> None:
+        import math
+        c.delete("all")
+        cl = self._calc
+        W, H = c.winfo_width(), c.winfo_height()
+        if not cl or W < 80 or H < 80:
+            return
+        x0, x1, y0, y1 = 52, W - 16, H - 52, 18
+        plo, phi_ = cl["rango"]
+        emax = max((abs(e) for _p, e in cl["residuo"]), default=30)
+        emax = math.ceil(emax / 10) * 10
+        px = lambda v: x0 + (v - plo) / (phi_ - plo) * (x1 - x0)
+        py = lambda v: y0 - (v + emax) / (2 * emax) * (y0 - y1)
+        paso = 20 if (phi_ - plo) <= 240 else 40
+        for v in range(int(math.floor(plo / 20) * 20), int(phi_) + 1, paso):
+            c.create_line(px(v), y0, px(v), y1, fill="#ECEFF1")
+            c.create_text(px(v), y0 + 11, text=str(v), font=F_PEQUE, fill=C_SUB_FG)
+        paso_e = max(10, int(emax / 4 / 10) * 10)
+        for v in range(-emax, emax + 1, paso_e):
+            c.create_line(x0, py(v), x1, py(v), fill="#ECEFF1")
+            c.create_text(x0 - 18, py(v), text=f"{v:+d}", font=F_PEQUE, fill=C_SUB_FG)
+        c.create_line(x0, py(0), x1, py(0), fill="#90A4AE")
+        for p, e in cl["residuo"]:
+            c.create_oval(px(p) - 2, py(e) - 2, px(p) + 2, py(e) + 2,
+                          fill="#B3D4F5", outline="")
+        pts = []
+        for p, m, _n in cl["ma"]:
+            pts.extend((px(p), py(m)))
+        if len(pts) >= 4:
+            c.create_line(*pts, fill="#1565C0", width=2)
+        for p, m, n in cl["ma"]:
+            c.create_oval(px(p) - 3, py(m) - 3, px(p) + 3, py(m) + 3,
+                          fill="#1565C0", outline="")
+        c.create_text((x0 + x1) // 2, H - 14,
+                      text="Predicción del modelo (total)", font=F_LABEL)
+        c.create_text(14, (y0 + y1) // 2, text="Residuo (total final − pred)",
+                      angle=90, font=F_LABEL)
+        c.create_text(x1 - 6, y1 + 6, anchor="ne", font=F_PEQUE, fill="#1565C0",
+                      text="— media móvil por tramos (n≥20)")
+
+    def _dibujar_ligas(self, c) -> None:
+        c.delete("all")
+        cl = self._calc
+        W, H = c.winfo_width(), c.winfo_height()
+        if not cl or W < 120 or H < 80:
+            return
+        ligas = cl["ligas"]
+        if not ligas:
+            return
+        y0 = 30
+        filas = min(len(ligas), max(6, (H - 60) // 16))
+        rh = (H - y0 - 24) / filas
+        x_lab, x_bar0 = 8, 172
+        x_bar1 = x_bar0 + max(60, int(0.42 * (W - 320)))
+        x_ses0, x_ses1 = x_bar1 + 34, max(x_bar1 + 80, W - 66)
+        max_rmse = max(l[2] for l in ligas[:filas]) or 1
+        max_ses = max(abs(l[3]) + l[4] for l in ligas[:filas]) or 1
+        cx = (x_ses0 + x_ses1) / 2
+        c.create_text(x_bar0, 14, anchor="w", font=F_PEQUE, fill=C_SUB_FG,
+                      text=f"RMSE por liga (n≥30; barras, {filas} de "
+                           f"{len(ligas)})")
+        c.create_text(cx, 14, anchor="center", font=F_PEQUE, fill=C_SUB_FG,
+                      text="Sesgo ± IC95% (puntos, eje centrado en 0)")
+        for i, (l, n, rmse, sesgo, ic) in enumerate(ligas[:filas]):
+            y = y0 + i * rh + rh / 2
+            c.create_text(x_lab, y, anchor="w", font=F_PEQUE,
+                          text=l[:26])
+            w = (rmse / max_rmse) * (x_bar1 - x_bar0)
+            c.create_rectangle(x_bar0, y - rh * 0.28, x_bar0 + w, y + rh * 0.28,
+                               fill="#64B5F6", outline="")
+            c.create_text(x_bar0 + w + 4, y, anchor="w", font=F_PEQUE,
+                          text=f"{rmse:.1f}")
+            # sesgo con IC (eje centrado)
+            escala = (x_ses1 - x_ses0) / 2 / max_ses
+            xs = cx + sesgo * escala
+            c.create_line(cx, y - rh * 0.4, cx, y + rh * 0.4, fill="#ECEFF1")
+            c.create_line(cx + (sesgo - ic) * escala, y, cx + (sesgo + ic) * escala,
+                          y, fill="#90A4AE")
+            colr = C_ROJO_FG if sesgo < 0 else C_VERDE
+            c.create_oval(xs - 3, y - 3, xs + 3, y + 3, fill=colr, outline="")
+            c.create_text(W - 60, y, anchor="w", font=F_PEQUE,
+                          text=f"n={n}")
+        if len(ligas) > filas:
+            c.create_text(8, H - 12, anchor="w", font=F_PEQUE, fill=C_SUB_FG,
+                          text=f"(mostrando {filas} de {len(ligas)} ligas, "
+                               f"ordenadas por RMSE; {cl['ligas_cortas']} "
+                               f"ligas con n<30 excluidas)")
+
+    def _dibujar_mes(self, c) -> None:
+        import math
+        c.delete("all")
+        cl = self._calc
+        W, H = c.winfo_width(), c.winfo_height()
+        meses = cl["meses"] if cl else []
+        if not meses or W < 80 or H < 80:
+            return
+        x0, x1 = 60, W - 20
+        n = len(meses)
+        paso_x = (x1 - x0) / max(1, n - 1)
+        # --- RMSE por mes (arriba) ---
+        yt0, yt1 = H * 0.06, H * 0.42
+        rmax = max(m[2] for m in meses) * 1.15 or 1
+        py = lambda v: yt1 - (v / rmax) * (yt1 - yt0)
+        c.create_text(x0, yt0 - 8, anchor="w", font=F_PEQUE, fill=C_SUB_FG,
+                      text=f"RMSE por mes (0 → {rmax:.0f})")
+        c.create_line(x0, yt1, x1, yt1, fill="#90A4AE")
+        pts = []
+        for i, (mes, _nn, rmse, _s, _ic) in enumerate(meses):
+            x = x0 + i * paso_x
+            pts.extend((x, py(rmse)))
+        if len(pts) >= 4:
+            c.create_line(*pts, fill="#1565C0", width=2)
+        for i, (mes, _nn, rmse, _s, _ic) in enumerate(meses):
+            x = x0 + i * paso_x
+            c.create_oval(x - 3, py(rmse) - 3, x + 3, py(rmse) + 3,
+                          fill="#1565C0", outline="")
+            c.create_text(x, py(rmse) - 10, text=f"{rmse:.0f}",
+                          font=F_PEQUE, fill="#1565C0")
+        # --- sesgo por mes (abajo, con IC) ---
+        yb0, yb1 = H * 0.58, H * 0.86
+        smax = max(abs(m[3]) + m[4] for m in meses) * 1.2 or 1
+        cero = (yb0 + yb1) / 2
+        pyb = lambda v: cero - (v / smax) * ((yb1 - yb0) / 2)
+        c.create_text(x0, yb0 - 12, anchor="w", font=F_PEQUE, fill=C_SUB_FG,
+                      text="Sesgo por mes ± IC95%")
+        c.create_line(x0, cero, x1, cero, fill="#90A4AE")
+        for i, (mes, _nn, _r, sesgo, ic) in enumerate(meses):
+            x = x0 + i * paso_x
+            c.create_rectangle(x - 7, cero, x + 7, pyb(sesgo),
+                               fill="#FFB74D", outline="")
+            c.create_line(x, pyb(sesgo - ic), x, pyb(sesgo + ic), fill="#90A4AE")
+            c.create_text(x, yb1 + 12, text=mes, font=F_PEQUE, fill=C_SUB_FG)
+        c.create_text(x0 - 44, (yb0 + yb1) // 2, text="sesgo", angle=90,
+                      font=F_PEQUE, fill=C_SUB_FG)
+
+    def _dibujar_cal(self, c) -> None:
+        c.delete("all")
+        cl = self._calc
+        W, H = c.winfo_width(), c.winfo_height()
+        if not cl or W < 80 or H < 80:
+            return
+        cal = cl["cal"]
+        lado = max(60, min(W - 90, H - 90))
+        x0, y0 = 62, H - 52
+        x1, y1 = x0 + lado, y0 - lado
+        px = lambda v: x0 + (v - 0.5) / 0.5 * (x1 - x0)
+        py = lambda v: y0 - (v - 0.5) / 0.5 * (y0 - y1)
+        for v in (0.5, 0.6, 0.7, 0.8, 0.9, 1.0):
+            c.create_line(px(v), y0, px(v), y1, fill="#ECEFF1")
+            c.create_line(x0, py(v), x1, py(v), fill="#ECEFF1")
+            c.create_text(px(v), y0 + 11, text=f"{v:.1f}", font=F_PEQUE,
+                          fill=C_SUB_FG)
+            c.create_text(x0 - 16, py(v), text=f"{v:.1f}", font=F_PEQUE,
+                          fill=C_SUB_FG)
+        c.create_line(px(0.5), py(0.5), px(1.0), py(1.0), fill="#90A4AE",
+                      dash=(5, 3))
+        pts = []
+        for pp, fr, _n in cal["bins"]:
+            pts.extend((px(pp), py(fr)))
+        if len(pts) >= 4:
+            c.create_line(*pts, fill="#1565C0", width=2)
+        for pp, fr, n in cal["bins"]:
+            r = min(9, 3 + n ** 0.5 / 18)
+            c.create_oval(px(pp) - r, py(fr) - r, px(pp) + r, py(fr) + r,
+                          fill="#1565C0", outline="")
+        c.create_text((x0 + x1) // 2, H - 14,
+                      text="Probabilidad predicha Φ(|Δ|/σ)  (línea proxy "
+                           "2·(q1+q2))", font=F_LABEL)
+        c.create_text(14, (y0 + y1) // 2, text="Frecuencia real del lado "
+                      "elegido", angle=90, font=F_LABEL)
+        c.create_text(x1 + 10, y1, anchor="nw", font=F_PEQUE, fill=C_SUB_FG,
+                      text=(f"n = {cal['n']:,}\nECE = {cal['ece'] * 100:.2f} pp\n"
+                            f"Brier = {cal['brier']:.4f}\n(el tamaño del punto "
+                            f"= n del bin)"))
+
+    def _dibujar_hist(self, c) -> None:
+        import math
+        c.delete("all")
+        cl = self._calc
+        W, H = c.winfo_width(), c.winfo_height()
+        if not cl or W < 80 or H < 80:
+            return
+        hist = cl["hist"]
+        bins = [(k, v) for k, v in hist["bins"] if -60 <= k <= 60]
+        if not bins:
+            return
+        x0, x1, y0, y1 = 56, W - 16, H - 52, 26
+        vmax = max(v for _k, v in bins) or 1
+        lo, hi = -62, 62
+        ancho = 2
+        px = lambda v: x0 + (v - lo) / (hi - lo) * (x1 - x0)
+        py = lambda v: y0 - (v / (vmax * 1.1)) * (y0 - y1)
+        for v in range(-60, 61, 20):
+            c.create_line(px(v), y0, px(v), y1, fill="#ECEFF1")
+            c.create_text(px(v), y0 + 11, text=f"{v:+d}", font=F_PEQUE,
+                          fill=C_SUB_FG)
+        sd = hist["sd"]
+        n = hist["n"]
+        # curva normal con la σ REAL de los residuos (misma área que el hist.)
+        curva = []
+        paso = 1.0
+        xv = lo + 1
+        while xv <= hi:
+            y = (n * ancho / (sd * math.sqrt(2 * math.pi))
+                 * math.exp(-0.5 * (xv / sd) ** 2))
+            curva.extend((px(xv), py(y)))
+            xv += paso
+        for k, v in bins:
+            c.create_rectangle(px(k - 1), py(v), px(k + 1), py(0),
+                               fill="#B0BEC5", outline="")
+        if len(curva) >= 4:
+            c.create_line(*curva, fill="#C62828", width=2)
+        c.create_line(x0, py(0), x1, py(0), fill="#90A4AE")
+        c.create_text((x0 + x1) // 2, H - 14,
+                      text="Residuo (total final − pred), bins de 2 pts",
+                      font=F_LABEL)
+        c.create_text(14, (y0 + y1) // 2, text="Frecuencia", angle=90,
+                      font=F_LABEL)
+        c.create_text(x1 - 6, y1 - 4, anchor="ne", font=F_PEQUE, fill=C_SUB_FG,
+                      text=(f"n = {n:,}  ·  media {hist['media']:+.1f}  ·  "
+                            f"σ real {sd:.1f}  ·  σ que usa Φ (media "
+                            f"modelos) {hist['sigma_ref']:.1f}\n"
+                            f"P(|e|>2σ) real: {hist['p2'] * 100:.1f}%  "
+                            f"(normal: 4.6%)  —  curva roja: normal con la "
+                            f"σ real"))
+
 
 # ===========================================================================
 #  Ventana principal
@@ -1551,6 +2397,15 @@ class App(tk.Tk):
         self.modelos_ligas: dict[str, Modelo] = {}
         self.db_ok = False
         self.db_error = ""
+
+        # Calibración de probabilidades (config.json -> "calibracion"): el
+        # factor agranda/encoje el RMSE con el que se calcula Φ(Δ/RMSE). Lo
+        # fija `calibracion.py --aplicar` tras medir la fiabilidad real.
+        try:
+            cal = base_datos.cargar_config().get("calibracion", {}) or {}
+            motor.FACTOR_RMSE = max(0.1, float(cal.get("factor_rmse", 1.0)))
+        except Exception:   # noqa: BLE001
+            pass
 
         self._menu()
         self._cuerpo()
@@ -1637,11 +2492,23 @@ class App(tk.Tk):
         }
         self.pestana_vivo = PestanaVivo(self.notebook, self)
         self.pestana_apuestas = PestanaApuestas(self.notebook, self)
+        self.pestana_grafico = PestanaGrafico(self.notebook, self)
 
         self.notebook.add(self.pestanas["EUROLIGA"], text="  EUROLIGA  ")
         self.notebook.add(self.pestanas["NBA"], text="  NBA  ")
         self.notebook.add(self.pestana_vivo, text="  ⚡ EN VIVO  ")
         self.notebook.add(self.pestana_apuestas, text="  💰 APUESTAS  ")
+        self.notebook.add(self.pestana_grafico, text="  📈 GRÁFICO  ")
+        # al entrar en GRÁFICO se recargan los datos (picks nuevos del día)
+        self.notebook.bind("<<NotebookTabChanged>>", self._al_cambiar_pestana)
+
+    def _al_cambiar_pestana(self, _e=None) -> None:
+        try:
+            actual = self.notebook.nametowidget(self.notebook.select())
+        except Exception:   # noqa: BLE001
+            return
+        if actual is self.pestana_grafico:
+            self.pestana_grafico.refrescar()
 
     def _barra_estado(self) -> None:
         self.estado = tk.Label(self, text="", anchor="w", font=("Calibri", 9),

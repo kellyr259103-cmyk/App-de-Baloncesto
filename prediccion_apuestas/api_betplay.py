@@ -264,18 +264,30 @@ class Partido:
 
     @property
     def finalizado(self) -> bool:
-        """¿El partido ya terminó? (para resolver la apuesta)"""
+        """
+        ¿El partido ya terminó? (para resolver la apuesta y recolectar).
+
+        Reglas:
+          * cualquier estado distinto de NOT_STARTED/STARTED = terminado;
+          * con la Q4 en el marcador, el tiempo restante a 0:0 y el reloj
+            acumulado ≥ 40 min, el partido solo puede continuar si hay
+            EMPATE al final del cuarto (prórroga). Sin empate está terminado
+            aunque la API aún marque `running=True`: Kambi deja la bandera
+            como estaba en el pitido final y retira el evento minutos
+            después, así que exigir `running=False` dejaba apuestas colgadas.
+        """
         if self.state not in ("NOT_STARTED", "STARTED"):
             # cualquier otro estado (RESULT / ENDED / FINISHED...) = terminado
             return True
         if "Q4" not in self.info_cuartos:
             return False
-        return (
-            self.corriendo is False
-            and (self.izq_min or 0) == 0
-            and (self.izq_seg or 0) == 0
-            and self.reloj_min >= 40          # baloncesto: 4 cuartos x 10 min
-        )
+        if (self.izq_min or 0) != 0 or (self.izq_seg or 0) != 0:
+            return False
+        if self.reloj_min < 40:                 # baloncesto: 4 cuartos x 10 min
+            return False
+        empate = (self.marcador_local is not None
+                  and self.marcador_local == self.marcador_visitante)
+        return not empate
 
     @property
     def en_ultimo_periodo(self) -> bool:

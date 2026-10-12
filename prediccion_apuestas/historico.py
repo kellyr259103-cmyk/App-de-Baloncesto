@@ -62,6 +62,7 @@ LIGAS_API_SPORTS: dict[str, tuple[int, ...]] = {
     # --- sin región en BetPlay (árbol de dos niveles) ---
     "euroleague": (120,),                  # Euroleague / Europe
     "nba": (12,),                          # NBA / USA
+    "nba_preseason": (12,),                # NBA Pretemporada → modelo NBA
     "nba_cup": (422,),                     # NBA Cup / USA
     "wnba": (13,),                         # NBA W (WNBA) / USA
     "aba_league": (198,),                  # ABA League / Europe
@@ -75,19 +76,39 @@ LIGAS_API_SPORTS: dict[str, tuple[int, ...]] = {
     "austria/obl": (217,),                 # Superliga (antes ÖBL) / Austria
     "australia/nbl": (1,),                 # NBL / Australia
     "belgium/top_division_1": (374,),      # Pro Basketball League / Belgium
+    "belgium/top_division__w_": (25,),     # Top Division Women / Belgium
     "bulgaria/nbl": (113,),                # NBL / Bulgaria
+    # Añadidas el 11-10-2026: ligas del feed que iban a respaldo y ya tienen id
+    # verificado con descubrir_ligas.py (las que no existen en API-Sports —
+    # Marruecos, Golfo Arábigo, NLB suizo, 1 Liga femenina polaca y las que
+    # salen SIN DATOS — siguen con el modelo de respaldo y se entrenarán solas
+    # con el recolector).
     "chile/liga_nacional": (114,),         # LNB / Chile
+    "china/cba_preseason": (31,),          # CBA / China (usa el modelo de la CBA)
+    "cyprus/division_a": (115,),           # Division A / Cyprus
+    "czech_republic/nbl": (32,),           # NBL / República Checa
+    "czech_republic/1__liga": (228,),      # 1. Liga / República Checa
     "france/elite": (2,),                  # LNB / France
+    "france/lfb__w_": (10,),               # LFB W / France
+    "greece/a1__w_": (234,),               # A1 Women / Greece
     "germany/bbl": (40,),                  # BBL / Germany
     "greece/gbl": (45,),                   # Basket League / Greece
+    "hungary/nb_i__w_": (47,),             # NB I A W / Hungary
+    "hungary/nb_i_a": (46,),               # NB I A / Hungary
     "italy/lega_a": (52,),                 # Lega A / Italy
+    "italy/a1__w_": (53,),                 # Serie A1 W / Italy
     "italy/serie_a2": (242,),              # Serie A2 / Italy
+    "israel/super_league": (51,),          # Super League / Israel
     "japan/b1__league": (56,),             # B League / Japan
     "japan/b2_league": (407,),             # B2.League / Japan
     "lithuania/lkl": (60,),                # LKL / Lithuania
+    "lithuania/lmkl__w_": (62,),           # Moteru Lyga W / Lithuania
+    "mexico/lnbp": (63,),                  # LNBP / Mexico
     "new_zealand/tauihi_basketball_aotearoa__w_": (375,),   # Tauihi W / Nueva Zelanda
+    "norway/blno": (68,),                  # BLNO / Norway
     "philippines/pba": (151, 152, 153,),   # Philippine/Governors/Commissioners Cup
     "poland/plk": (72,),                   # Energa Basket Liga / Poland
+    "poland/1_liga": (71,),                # 1 Liga (2ª división) / Poland
     "portugal/campeonato_nacional_2": (261,),   # Proliga / Portugal
     "portugal/lpb": (74,),                 # LPB (1ª división) / Portugal
     "portugal/lfb__w_": (260,),            # LFB Women / Portugal
@@ -96,6 +117,10 @@ LIGAS_API_SPORTS: dict[str, tuple[int, ...]] = {
     "south_korea/kbl": (91,),              # KBL / South Korea
     "spain/leb_oro": (95,),                # Primera FEB (antes LEB Oro) / Spain
     "spain/liga_acb": (117,),              # ACB / Spain
+    "spain/liga_femenina__w_": (94,),      # Liga Femenina W / Spain
+    "sweden/basketligan__w_": (97,),       # Basketligan W / Sweden
+    "sweden/superettan": (99,),            # Superettan / Sweden
+    "switzerland/sb_league__w_": (101,),   # SB League W / Switzerland
     "turkey/super_league": (104,),         # Basketbol Süper Ligi / Turkey
     "turkey/tbl": (102,),                  # TBL (2ª división) / Turkey
     "united_kingdom/super_league_basketball": (108,),   # SLB / Reino Unido

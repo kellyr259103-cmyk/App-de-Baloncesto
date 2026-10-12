@@ -22,5 +22,6 @@ venv/
 # --- logs y temporales ------------------------------------------------------ #
 *.log
 ~$*.xlsx
+*.bak
 Thumbs.db
 .DS_Store

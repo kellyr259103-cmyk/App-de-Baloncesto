@@ -69,28 +69,45 @@ class Apuesta:
         return self.stake + self.beneficio
 
 
-def resolver(
+def _unir_nota(resultado: str, prev: str) -> str:
+    """
+    Une el texto del resultado con la nota ANTERIOR sin pisarla.
+
+    La nota original del bot ("AUTO descanso2Q…: 1Q=.. 2Q=..") es valiosa
+    (el replay y las auditorías la necesitan); antes se perdía al liquidar.
+    Repetible: si ya había un resultado delante, lo sustituye (no acumula).
+    """
+    prev = prev or ""
+    if prev.startswith(("Gana ", "Pierde ", "Total exactamente")):
+        prev = prev.split(" · ", 1)[1] if " · " in prev else ""
+    return f"{resultado} · {prev}" if prev else resultado
+
+
+def recalcular(
     apuesta: Apuesta,
     total_final: float,
     ahora: Optional[datetime] = None,
 ) -> Apuesta:
     """
-    Resuelve la apuesta con el total final del partido.
+    Fija (o CORRIGE) el resultado de la apuesta con un total final.
+
+    A diferencia de `resolver`, no exige que esté PENDIENTE: se usa para
+    re-liquidar con el resultado OFICIAL cuando el total del feed era
+    impreciso (prórrogas, datos con retraso...). Recalcula estado y dinero.
 
     - OVER gana si total_final > línea
     - UNDER gana si total_final < línea
     - Si total_final == línea -> ANULADA (push) y se devuelve el stake
     """
-    if apuesta.estado != ESTADO_PENDIENTE:
-        return apuesta
-
     apuesta.total_final = float(total_final)
     apuesta.fecha_resolucion = ahora or datetime.now()
 
     if abs(float(total_final) - float(apuesta.linea)) < 1e-9:
         apuesta.estado = ESTADO_ANULADA
         apuesta.beneficio = 0.0
-        apuesta.nota = "Total exactamente en la línea: apuesta anulada (push)."
+        apuesta.nota = _unir_nota(
+            "Total exactamente en la línea: apuesta anulada (push).",
+            apuesta.nota)
         return apuesta
 
     gana_over = float(total_final) > float(apuesta.linea)
@@ -99,11 +116,33 @@ def resolver(
     if gana:
         apuesta.estado = ESTADO_GANADA
         apuesta.beneficio = round(apuesta.stake * (apuesta.cuota - 1.0), 2)
-        apuesta.nota = f"Gana {apuesta.seleccion}: total {total_final:g} vs línea {apuesta.linea:g}."
+        apuesta.nota = _unir_nota(
+            f"Gana {apuesta.seleccion}: total {total_final:g} vs línea "
+            f"{apuesta.linea:g}.", apuesta.nota)
     else:
         apuesta.estado = ESTADO_PERDIDA
         apuesta.beneficio = round(-apuesta.stake, 2)
-        apuesta.nota = f"Pierde {apuesta.seleccion}: total {total_final:g} vs línea {apuesta.linea:g}."
+        apuesta.nota = _unir_nota(
+            f"Pierde {apuesta.seleccion}: total {total_final:g} vs línea "
+            f"{apuesta.linea:g}.", apuesta.nota)
+    return apuesta
+
+
+def resolver(
+    apuesta: Apuesta,
+    total_final: float,
+    ahora: Optional[datetime] = None,
+) -> Apuesta:
+    """
+    Resuelve la apuesta con el total final del partido (si sigue pendiente).
+
+    - OVER gana si total_final > línea
+    - UNDER gana si total_final < línea
+    - Si total_final == línea -> ANULADA (push) y se devuelve el stake
+    """
+    if apuesta.estado != ESTADO_PENDIENTE:
+        return apuesta
+    return recalcular(apuesta, total_final, ahora)
     return apuesta
 
 

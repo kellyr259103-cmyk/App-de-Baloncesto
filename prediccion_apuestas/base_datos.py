@@ -121,6 +121,64 @@ CREATE TABLE IF NOT EXISTS descansos_liga (
 );
 """
 
+# Migración sobre bases ya creadas: marca de "total final verificado con el
+# resultado oficial" (API-Sports) y el histórico de líneas/cuotas reales.
+ESQUEMA_EXTRAS = """
+ALTER TABLE apuestas ADD COLUMN IF NOT EXISTS
+    verificado BOOLEAN NOT NULL DEFAULT FALSE;
+
+CREATE INDEX IF NOT EXISTS apuestas_verificado_idx ON apuestas (verificado);
+
+CREATE TABLE IF NOT EXISTS cuotas_historial (
+    id            BIGSERIAL PRIMARY KEY,
+    momento       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    evento_id     BIGINT NOT NULL,
+    liga          TEXT NOT NULL DEFAULT '',
+    partido       TEXT NOT NULL DEFAULT '',
+    linea         DOUBLE PRECISION,
+    cuota_over    DOUBLE PRECISION,
+    cuota_under   DOUBLE PRECISION,
+    period_id     TEXT DEFAULT '',
+    reloj         TEXT DEFAULT '',
+    finalizado    BOOLEAN NOT NULL DEFAULT FALSE,
+    total_final   DOUBLE PRECISION
+);
+CREATE INDEX IF NOT EXISTS cuotas_historial_evento_idx
+    ON cuotas_historial (evento_id, id DESC);
+
+-- Marca de "en el descanso 2Q→3Q" en cada movimiento de línea: permite medir
+-- si la casa re-afina la línea DURANTE el descanso o la deja congelada.
+ALTER TABLE cuotas_historial ADD COLUMN IF NOT EXISTS
+    en_descanso BOOLEAN NOT NULL DEFAULT FALSE;
+
+-- Registro de TODAS las señales del descanso (apostadas o no) para medir
+-- edge de forma honesta. UNIQUE(evento_id): la PRIMERA evaluación válida del
+-- descanso es la línea de entrada y nunca se sobrescribe.
+CREATE TABLE IF NOT EXISTS señales (
+    id              BIGSERIAL PRIMARY KEY,
+    evento_id       BIGINT NOT NULL,
+    liga            TEXT NOT NULL DEFAULT '',
+    partido         TEXT NOT NULL DEFAULT '',
+    momento         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    q1              DOUBLE PRECISION NOT NULL,
+    q2              DOUBLE PRECISION NOT NULL,
+    linea_entrada   DOUBLE PRECISION,
+    cuota_over      DOUBLE PRECISION,
+    cuota_under     DOUBLE PRECISION,
+    pred_modelo     DOUBLE PRECISION,
+    delta           DOUBLE PRECISION,
+    retraso_seg     INTEGER,
+    modelo_tipo     TEXT DEFAULT '',
+    apuesta_id      BIGINT,
+    linea_3q_5min   DOUBLE PRECISION,
+    linea_cierre    DOUBLE PRECISION,
+    total_final     DOUBLE PRECISION,
+    resuelta_en     TIMESTAMPTZ,
+    CONSTRAINT senales_evento_unico UNIQUE (evento_id)
+);
+CREATE INDEX IF NOT EXISTS senales_resueltas_idx ON señales (resuelta_en);
+"""
+
 
 class ErrorBaseDatos(Exception):
     """Error de conexión o de consulta a PostgreSQL."""
@@ -198,6 +256,7 @@ def crear_esquema(cfg: Optional[dict] = None) -> None:
         with conn:
             with conn.cursor() as cur:
                 cur.execute(ESQUEMA)
+                cur.execute(ESQUEMA_EXTRAS)
     finally:
         conn.close()
 
@@ -354,3 +413,349 @@ def estadisticas_bd() -> dict:
         "stake_total": float(stake or 0),
         "beneficio": float(benef or 0),
     }
+
+
+# --------------------------------------------------------------------------- #
+#  Candado anti-duplicados, verificación y cuotas reales                      #
+# --------------------------------------------------------------------------- #
+def existe_apuesta(evento_id: int) -> bool:
+    """¿Ya hay una apuesta guardada para este partido? (candado persistente)."""
+    conn = conectar()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1 FROM apuestas WHERE evento_id = %s LIMIT 1",
+                        (evento_id,))
+            return cur.fetchone() is not None
+    finally:
+        conn.close()
+
+
+def apuestas_para_reconciliar(horas: float = 14.0) -> list[tuple[Apuesta, bool]]:
+    """
+    Apuestas recientes que aún pueden corregirse con el resultado oficial:
+
+      * las PENDIENTE (por si el evento desapareció del feed sin cerrarse), y
+      * las resueltas con `verificado = false` (total aún sin contrastar).
+
+    Devuelve [(Apuesta, verificado), ...] de las últimas `horas` horas.
+    """
+    conn = conectar()
+    try:
+        with conn.cursor(cursor_factory=extras.DictCursor) as cur:
+            cur.execute(
+                """SELECT id, fecha, evento_id, partido, liga_apuesta,
+                          liga_modelo, mercado, seleccion, linea, cuota, stake,
+                          prediccion, diferencia, probabilidad, estado,
+                          total_final, beneficio, nota, fecha_resolucion,
+                          verificado
+                     FROM apuestas
+                    WHERE fecha >= now() - (%s * interval '1 hour')
+                      AND (estado = 'PENDIENTE' OR verificado = false)
+                    ORDER BY id""", (horas,))
+            filas = cur.fetchall()
+    finally:
+        conn.close()
+
+    salida: list[tuple[Apuesta, bool]] = []
+    for f in filas:
+        a = _fila_a_apuesta(tuple(f)[:19])
+        salida.append((a, bool(f["verificado"])))
+    return salida
+
+
+def marcar_verificado(apuesta_id: int, verificado: bool = True) -> None:
+    conn = conectar()
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE apuestas SET verificado = %s WHERE id = %s",
+                            (verificado, apuesta_id))
+    finally:
+        conn.close()
+
+
+def ultimas_cuotas() -> dict[int, tuple]:
+    """
+    Último movimiento guardado por evento en `cuotas_historial`:
+    {evento_id: (linea, cuota_over, cuota_under, period_id, finalizado, total_final)}.
+
+    Sirve para no repetir filas al reiniciar la app (el caché en memoria se
+    pierde) y guardar solo cuando la línea/cuotas cambian de verdad.
+    """
+    conn = conectar()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT DISTINCT ON (evento_id)
+                          evento_id, linea, cuota_over, cuota_under,
+                          period_id, finalizado, total_final
+                     FROM cuotas_historial
+                    ORDER BY evento_id, id DESC""")
+            return {r[0]: tuple(r[1:]) for r in cur.fetchall()}
+    finally:
+        conn.close()
+
+
+def guardar_cuotas(filas: list[tuple]) -> int:
+    """
+    Inserta movimientos de línea/cuota en `cuotas_historial`.
+
+    Cada fila: (evento_id, liga, partido, linea, cuota_over, cuota_under,
+    period_id, reloj, finalizado, total_final, en_descanso).
+    """
+    if not filas:
+        return 0
+    conn = conectar()
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                extras.execute_values(
+                    cur,
+                    """INSERT INTO cuotas_historial
+                         (evento_id, liga, partido, linea, cuota_over,
+                          cuota_under, period_id, reloj, finalizado,
+                          total_final, en_descanso)
+                       VALUES %s""",
+                    filas, page_size=200)
+        return len(filas)
+    finally:
+        conn.close()
+
+
+# --------------------------------------------------------------------------- #
+#  Señales (registro de TODAS las evaluaciones del descanso, apostadas o no)  #
+# --------------------------------------------------------------------------- #
+def guardar_senal(p, res, retraso, modelo_tipo: str = "") -> bool:
+    """
+    Registra una señal del descanso 2Q→3Q (se apueste o no).
+
+    ON CONFLICT (evento_id) DO NOTHING: la PRIMERA evaluación válida es la
+    línea de entrada y NUNCA se sobrescribe. Silencioso por diseño: un fallo
+    de registro no puede interrumpir al bot de apuestas (devuelve False).
+    """
+    try:
+        conn = conectar()
+        try:
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """INSERT INTO señales
+                             (evento_id, liga, partido, q1, q2, linea_entrada,
+                              cuota_over, cuota_under, pred_modelo, delta,
+                              retraso_seg, modelo_tipo)
+                           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                                   %s, %s)
+                           ON CONFLICT (evento_id) DO NOTHING""",
+                        (int(p.evento_id), p.clave_liga or "", p.nombre or "",
+                         float(p.q1), float(p.q2),
+                         None if p.linea is None else float(p.linea),
+                         p.cuota_over, p.cuota_under,
+                         getattr(res, "prediccion", None),
+                         getattr(res, "diferencia", None),
+                         None if retraso is None else int(retraso),
+                         modelo_tipo or ""))
+            return True
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001 — jamás interrumpe al bot
+        return False
+
+
+def vincular_apuesta(evento_id: int, apuesta_id: int) -> None:
+    """Enlaza la señal con la apuesta creada (si el bot la tomó). Silencioso."""
+    try:
+        conn = conectar()
+        try:
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """UPDATE señales SET apuesta_id = %s
+                            WHERE evento_id = %s AND apuesta_id IS NULL""",
+                        (int(apuesta_id), int(evento_id)))
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _reloj_a_segundos(reloj) -> Optional[int]:
+    try:
+        m, s = str(reloj or "").split(":")
+        return int(m) * 60 + int(s)
+    except (ValueError, AttributeError):
+        return None
+
+
+def _linea_3q_5min(evento_id: int) -> Optional[float]:
+    """
+    Línea de cierre a los 5 minutos de juego del 3Q.
+
+    Definición (fijada; no se cambia después): como `cuotas_historial` solo
+    guarda CAMBIOS, la línea "vigente" a los +5:00 es la ÚLTIMA fila del
+    evento con period_id='QUARTER3' y reloj ≤ inicio_del_3Q + 5:00. El inicio
+    del 3Q se deriva del reloj acumulado de medio tiempo registrado
+    (20:00 = FIBA / 24:00 = NBA; por defecto FIBA).
+
+    Devuelve NULL cuando:
+      * no hay ninguna fila de QUARTER3 dentro de (inicio, inicio + 5:00], o
+      * hay una PAUSA DE CAPTURA EVIDENTE: la primera fila capturada del 3Q
+        aparece con más de 90 s de juego ya transcurridos (se perdió la
+        transición y no puede afirmarse la línea vigente a los 5 min).
+
+    Limitación documentada: un corte de captura DESPUÉS de la primera fila
+    del 3Q y ANTES de +5:00 no es distinguible de "la línea no cambió" con
+    estos datos (no hay latido/heartbeat); en ese caso no se aproxima.
+    """
+    conn = conectar()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT reloj, linea FROM cuotas_historial
+                    WHERE evento_id = %s AND period_id = 'QUARTER3'
+                      AND linea IS NOT NULL AND reloj <> ''
+                    ORDER BY id""", (evento_id,))
+            filas = cur.fetchall()
+            cur.execute(
+                """SELECT reloj FROM cuotas_historial
+                    WHERE evento_id = %s AND reloj <> '' AND (
+                          en_descanso = true
+                          OR (period_id = 'QUARTER2'
+                              AND reloj IN ('20:00','24:00')))
+                    ORDER BY id LIMIT 1""", (evento_id,))
+            fila = cur.fetchone()
+    finally:
+        conn.close()
+    if not filas:
+        return None
+    cuarto = 12 if (fila and fila[0] == "24:00") else 10
+    inicio = 2 * cuarto * 60
+    limite = inicio + 5 * 60
+    primera = _reloj_a_segundos(filas[0][0])
+    if primera is not None and primera > inicio + 90:
+        return None                    # pausa de captura evidente
+    elegida: Optional[float] = None
+    for reloj, linea in filas:
+        seg = _reloj_a_segundos(reloj)
+        if seg is None:
+            continue
+        if inicio < seg <= limite:
+            elegida = float(linea)     # la ÚLTIMA ≤ inicio+5:00
+    return elegida
+
+
+def _linea_cierre_descanso(evento_id: int) -> Optional[float]:
+    """
+    Última línea del descanso — SOLO REFERENCIA.
+
+    Se espera CLV≈0 contra ella por construcción: la línea se queda CONGELADA
+    durante el descanso (Kambi la re-mueve con el juego del 3Q, no con el
+    reloj del descanso). El CLV real se mide contra `linea_3q_5min`.
+    """
+    conn = conectar()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT linea FROM cuotas_historial
+                    WHERE evento_id = %s AND linea IS NOT NULL AND (
+                          en_descanso = true
+                          OR (period_id = 'QUARTER2'
+                              AND reloj IN ('20:00','24:00')))
+                    ORDER BY id DESC LIMIT 1""", (evento_id,))
+            fila = cur.fetchone()
+    finally:
+        conn.close()
+    return float(fila[0]) if fila else None
+
+
+def _total_final_senal(partido: str, momento, apuesta_id) -> Optional[float]:
+    """Total oficial: de la apuesta enlazada si ya lo tiene; si no, muestras."""
+    conn = conectar()
+    try:
+        with conn.cursor() as cur:
+            if apuesta_id is not None:
+                cur.execute("SELECT total_final FROM apuestas WHERE id = %s",
+                            (apuesta_id,))
+                fila = cur.fetchone()
+                if fila and fila[0] is not None:
+                    return float(fila[0])
+            fecha = momento.date() if hasattr(momento, "date") else None
+            cur.execute(
+                """SELECT total FROM muestras
+                    WHERE partido = %s AND (%s IS NULL OR fecha = %s)
+                    ORDER BY id DESC LIMIT 1""",
+                (partido, fecha, fecha))
+            fila = cur.fetchone()
+    finally:
+        conn.close()
+    return float(fila[0]) if fila and fila[0] is not None else None
+
+
+def cerrar_senales() -> int:
+    """
+    Completa las señales con cierre y resultado. IDEMPOTENTE (solo rellena
+    columnas NULL; puede correr cuantas veces quiera). Nunca lanza.
+
+      * linea_3q_5min: a los 5 min de juego del 3Q (ver _linea_3q_5min).
+      * linea_cierre: última línea del descanso (solo referencia; ver nota).
+      * total_final: apuesta enlazada o `muestras` por partido+fecha.
+      * resuelta_en: cuando hay total_final.
+
+    Devuelve cuántas filas se actualizaron.
+    """
+    try:
+        conn = conectar()
+    except Exception:  # noqa: BLE001
+        return 0
+    try:
+        try:
+            conn.autocommit = True   # un fallo puntual no aborta el resto
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT id, evento_id, partido, momento,
+                              linea_3q_5min, linea_cierre, total_final,
+                              apuesta_id
+                         FROM señales
+                        WHERE resuelta_en IS NULL
+                           OR linea_3q_5min IS NULL
+                           OR linea_cierre IS NULL
+                        ORDER BY id""")
+                filas = cur.fetchall()
+        except Exception:  # noqa: BLE001
+            return 0
+
+        cambios = 0
+        for (sid, ev, partido, momento, l3, lc, total, ap_id) in filas:
+            nuevo_3q = l3 if l3 is not None else _linea_3q_5min(ev)
+            nueva_lc = lc if lc is not None else _linea_cierre_descanso(ev)
+            nuevo_total = (total if total is not None
+                           else _total_final_senal(partido, momento, ap_id))
+            if nuevo_3q is None and nueva_lc is None and nuevo_total is None:
+                continue
+            try:
+                with conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            """UPDATE señales
+                                  SET linea_3q_5min =
+                                        COALESCE(linea_3q_5min, %s),
+                                      linea_cierre =
+                                        COALESCE(linea_cierre, %s),
+                                      total_final =
+                                        COALESCE(total_final, %s),
+                                      resuelta_en = CASE
+                                        WHEN COALESCE(total_final, %s)
+                                             IS NOT NULL
+                                             AND resuelta_en IS NULL
+                                        THEN now() ELSE resuelta_en END
+                                WHERE id = %s""",
+                            (nuevo_3q, nueva_lc, nuevo_total, nuevo_total,
+                             sid))
+                cambios += 1
+            except Exception:  # noqa: BLE001
+                continue
+        return cambios
+    finally:
+        conn.close()

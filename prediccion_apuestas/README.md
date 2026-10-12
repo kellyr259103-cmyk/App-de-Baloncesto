@@ -519,6 +519,109 @@ CREATE TABLE IF NOT EXISTS apuestas (
     total_final DOUBLE PRECISION,
     beneficio DOUBLE PRECISION,
     nota TEXT DEFAULT '',
-    fecha_resolucion TIMESTAMPTZ
+    fecha_resolucion TIMESTAMPTZ,
+    verificado BOOLEAN NOT NULL DEFAULT FALSE   -- total contrastado con API
 );
 ```
+
+---
+
+# Integridad de datos y calibración (11-10-2026)
+
+Auditoría del primer día de apuestas reales (41 paperbet): 10G/13L, −23.2 % de
+ROI. Los fallos encontrados y su solución, ya implementada:
+
+## 1. Candado anti-duplicados PERSISTENTE
+El "no repetir partido" vivía solo en memoria: al reiniciar la app se perdía y
+el bot volvía a apostar partidos que seguían en su descanso de ~15 min
+(duplicados reales: ids 6/14, 8/13, 9/17, 10/16, 11/15). Ahora, antes de
+apostar, `_auto_apostar_en_descanso` comprueba `base_datos.existe_apuesta()`.
+
+## 2. Liquidación con resultado OFICIAL (`resultados.py` + `reconciliacion.py`)
+Kambi deja `running=True` en el pitido, a veces da totales imprecisos
+(prórrogas, reloj con retraso: hubo un 176 registrado sobre un partido de 205
+y un U21 colándose por el senior) y elimina el evento sin estado final (las
+apuestas quedaban colgadas). Ahora:
+
+- La app **reconcilia cada ~10 min** (en hilo): busca el resultado en
+  API-Sports (`games?date=…`, emparejado de equipos por Jaccard) y:
+  - cierra los PENDIENTE cuyo evento ya no está en el feed (≥1 h) o lleva
+    ≥2 h sin cerrarse;
+  - **corrige** los totales ya resueltos que no cuadran (columna `verificado`).
+- Botón **✍ Liquidar manual…** en APUESTAS para ligas sin datos oficiales
+  (escribe el total y recalcula con `paperbet.recalcular`).
+- CLI: `python reconciliacion.py --horas 48`.
+
+## 3. Histórico de líneas reales (`cuotas_historial`)
+En cada ping se guardan a PostgreSQL los cambios de línea/cuotas del feed
+(una fila por cambio + cierre con total). Es la base para backtests con
+**cuotas reales** (hoy solo había proxy `(1Q+2Q)×2`).
+
+## 4. Calibración de probabilidades (`calibracion.py`)
+Mide con walk-forward si `P = Φ(Δ/RMSE)` es honesta:
+`python calibracion.py --desde 2025-10-11 --hasta 2026-10-11 --aplicar`.
+Resultado 11-10: **bien calibrada** (ECE 1.4 pp; k=1.10 aplicado en
+`config.json → calibracion.factor_rmse`; `motor.FACTOR_RMSE` lo usa la app).
+
+## 5. Umbrales honestos y política de ligas
+- **Piso Δ ≥ 2.0 y EV ≥ 0 %** en el código (`UMBRAL_MINIMO`/`EV_MINIMA`):
+  el estado −23.2 % vino de operar con Δ=0.5 contra la línea real.
+- `config.json → auto.solo_modelo_propio` (por defecto **true**): no apuesta
+  con modelos de respaldo (el respaldo hizo 0/4 en el día real).
+- `auto.ligas_validadas` (lista blanca opcional): si tiene ligas, solo se
+  apuesta en ellas. La sugiere `python roi_ligas.py` (n≥20 y ROI>0).
+
+## 6. Cobertura y modelos
+- `python descubrir_ligas.py --auto`: ligas del feed sin id + candidato
+  validado **por equipos** (evita el caso "1 Liga (F)" ≠ Energa W).
+- `modelos.entrenar_todo`: ligas con 8-29 muestras ahora reciben un modelo
+  **mezcla con el global (pooling)** en vez de quedarse con el de otra liga
+  (p. ej. NBA Cup). Con <8 muestras, respaldo (y la app ya no lo apuesta).
+- `python roi_ligas.py`: winrate y ROI reales por liga con la cuota apostada.
+
+## 7. Robustez de los backtests
+`_ajustar` puede fallar con datos previos insuficientes en el arranque de una
+liga; backtest.py / backtest_cuota_justa.py / calibracion.py ahora lo capturan
+y saltan ese partido en vez de romper la corrida.
+
+## 8. Diagnóstico de las pérdidas (`diagnostico.py`)
+Con las 40 primeras apuestas resueltas (total: 50.0 % de acierto, ROI −10.8 %)
+el desglose dice:
+
+| grupo | n | winrate | err. modelo | err. casa | ROI |
+|---|---|---|---|---|---|
+| modelo PROPIO | 29 | 58.6 % | 11.07 | 11.12 | +4.4 % |
+| respaldo EUROLIGA | 11 | 27.3 % | 16.90 | 10.59 | −50.8 % |
+
+Lectura: con ligas propias el modelo empata con la casa (mismo error medio);
+el desastre vino del modelo de respaldo (Δ fantasma de 20-30 pts en ligas con
+otro ritmo). Contra la línea REAL el Δ es ruido de estimación entre dos
+estimadores equivalentes → ≈50 % de acierto → el margen de la cuota (~1.8
+paga a 55.6 % de breakeven) lo convierte en −EV. El backtest contra la línea
+proxy `(1Q+2Q)×2` parecía bueno porque el proxy NO sabe nada del partido.
+
+## 9. Plan de validación (11-10-2026)
+
+Verificado con datos: añadir información de equipo al modelo no mejora la
+predicción (`backtest_mejoras.py`: RMSE 11.66 → 11.59 en 8.552 partidos
+2026; deltas por liga dentro del ruido). La "escalera de oponentes" mide el
+edge evaporándose: contra la línea naive 77 % de winrate, contra un oponente
+informado en ritmo de equipos 55.8 % (|Δ|≥2), contra la casa real 50.0 %.
+
+Como no existe histórico de cuotas reales, el edge SOLO se puede validar
+prospectivamente. Protocolo en marcha (mientras, paperbet sin dinero):
+
+1. El bot apuesta solo con modelo propio y los pisos activos (Δ≥2, EV≥0).
+2. Se acumulan `cuotas_historial` (movimientos de línea) y resultados.
+3. KPIs por liga para "graduarse": n ≥ 50 decididas · ROI > 0 · CLV > 0
+   (`roi_ligas.py`, `clv.py` — CLV = ¿cerramos mejor que la línea de cierre?).
+4. Las ligas graduadas entran en `config.json → auto.ligas_validadas` (solo
+   esas se apostarían con dinero real; stake fraccional).
+5. Si ninguna graduía en 2-4 semanas: conclusión honesta — el modelo no bate
+   el mercado del total al descanso con estos datos; la app queda como
+   herramienta de análisis. Mejorar exigiría datos que la casa no tenga
+   (lesiones/alineaciones) o mercados más ilíquidos, a testear aparte.
+
+Reglas: ningún cambio de estrategia sin re-validar en walk-forward (y contra
+cuota real cuando haya muestra); prohibido el respaldo (0/11 real); el CLV es
+el juez — ROI positivo con CLV negativo = suerte, no edge.

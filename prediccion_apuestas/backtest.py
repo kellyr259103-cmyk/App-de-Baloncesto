@@ -147,9 +147,12 @@ def _backtest_liga(partidos: list[tuple], desde: date, hasta: date,
         # reentrenar el MCO cada SALTO días nuevos (o al principio)
         if modelo is None or dias_desde_ultimo >= SALTO_REENTRENO:
             datos = [(a, b, c) for f, a, b, c in partidos if f < fecha]
-            modelo = motor._ajustar(datos, "backtest", "walk-forward")
+            try:
+                modelo = motor._ajustar(datos, "backtest", "walk-forward")
+            except Exception:  # noqa: BLE001 (datos previos insuficientes)
+                modelo = None
             dias_desde_ultimo = 0
-            if modelo.errores or modelo.n == 0:
+            if modelo is not None and (modelo.errores or modelo.n == 0):
                 modelo = None
         if modelo is None:
             continue

@@ -9,5 +9,23 @@
   },
   "api_sports": {
     "token": "PEGA_AQUI_TU_TOKEN"
+  },
+  "vivo": {
+    "auto": true,
+    "intervalo": 5,
+    "auto_apostar": true,
+    "umbral": 2.0,
+    "ev_min": 2.0,
+    "filtro_descanso": false
+  },
+  "auto": {
+    "_comentario": "Política de la apuesta automática: solo_modelo_propio descarta las ligas que usan el modelo de otra liga (respaldo); ligas_validadas (si NO está vacía) restringe la apuesta a esa lista blanca (la sugiere roi_ligas.py). max_retraso_seg: si >0, solo apuesta dentro de los primeros N segundos del descanso (0 = sin límite).",
+    "solo_modelo_propio": true,
+    "ligas_validadas": [],
+    "max_retraso_seg": 0
+  },
+  "calibracion": {
+    "_comentario": "Factor de enfriamiento del RMSE para Φ(Δ/σ); lo escribe `python calibracion.py --aplicar`.",
+    "factor_rmse": 1.1
   }
 }

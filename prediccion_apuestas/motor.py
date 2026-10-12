@@ -31,10 +31,24 @@ from typing import Optional
 NS_MAIN = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
 NS_REL = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
 
-# Ruta por defecto del libro original (prototipo en Excel)
-EXCEL_POR_DEFECTO = os.path.join(
-    os.path.expanduser("~"), "OneDrive", "Documentos", "Predicciones en vivo basque.xlsx"
-)
+# Ruta por defecto del libro original (prototipo en Excel): se busca en varias
+# ubicaciones y se usa la primera que exista (la original tiene prioridad).
+def _buscar_excel_por_defecto() -> str:
+    candidatos = [
+        os.path.join(os.path.expanduser("~"), "OneDrive", "Documentos",
+                     "Predicciones en vivo basque.xlsx"),
+        os.path.join(os.path.expanduser("~"), "Downloads",
+                     "Predicciones en vivo basque.xlsx"),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                     "Predicciones en vivo basque.xlsx"),
+    ]
+    for ruta in candidatos:
+        if os.path.exists(ruta):
+            return ruta
+    return candidatos[0]
+
+
+EXCEL_POR_DEFECTO = _buscar_excel_por_defecto()
 
 # Hojas del libro y sus configuraciones
 HOJAS = {
@@ -48,6 +62,12 @@ RMSE_TEST = {
     "EUROLIGA": {"dos": 13.1, "uno": 15.3, "naive": 25.5},
     "NBA": {"dos": 14.7, "uno": 17.2, "naive": 28.6},
 }
+
+# Calibración de las probabilidades: la app lo ajusta con `calibracion.py`
+# (config.json -> "calibracion": {"factor_rmse": k}). k > 1 = probabilidades
+# más prudentes (el modelo crudo suele ser demasiado confiado y la tasa real
+# de acierto está por debajo de la prometida).
+FACTOR_RMSE = 1.0
 
 
 # --------------------------------------------------------------------------- #
@@ -415,7 +435,8 @@ def predecir(modelo: Modelo, q1, q2, linea) -> Resultado:
     if r.prediccion is not None and linea is not None:
         r.diferencia = r.prediccion - linea            # B11
         r.veredicto = "OVER" if r.diferencia >= 0 else "UNDER"   # B12
-        sigma = modelo.rmse_test_dos if q2 is not None else modelo.rmse_test_uno
+        sigma = (modelo.rmse_test_dos if q2 is not None
+                 else modelo.rmse_test_uno) * FACTOR_RMSE
         if sigma:
             r.prob_over = _normal_cdf(r.diferencia / sigma)
     else:
