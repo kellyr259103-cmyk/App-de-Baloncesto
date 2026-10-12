@@ -68,7 +68,10 @@ UMBRAL_MINIMO = 2.0                 # Δ mínimo que la app permite usar
 EV_MINIMA = 0.0                     # EV mínimo que la app permite usar (%)
 INTERVALO_POR_DEFECTO = 5          # segundos entre pings automáticos
 INTERVALO_RECUPERACION = 600       # seg. mínimos entre búsquedas en API-Sports
-UMBRAL_POR_DEFECTO = 2.0           # Δ mínimo (pts) para apostar solo en el descanso
+UMBRAL_POR_DEFECTO = 3.0           # Δ mínimo (pts) para apostar solo en el descanso
+# Tope por defecto del rango de Δ de la apuesta automática (3–5 por defecto;
+# el tope a 0 = sin límite superior, solo piso). Ambos ajustables en la UI.
+UMBRAL_MAX_POR_DEFECTO = 5.0
 # Valor esperado mínimo. 0.0 = que la apuesta sea +EV con la cuota que ofrece
 # la casa (con su margen del ~8%, un Δ pequeño puede ser -EV igualmente).
 EV_MINIMA_POR_DEFECTO = 0.0
@@ -409,6 +412,10 @@ class PestanaVivo(ttk.Frame):
             value=bool(vivo.get("auto_apostar", True)))
         self.var_umbral = tk.DoubleVar(
             value=float(vivo.get("umbral", UMBRAL_POR_DEFECTO)))
+        # tope del rango de Δ para la apuesta automática (por defecto 5.0;
+        # 0 = sin límite superior, solo piso Δ ≥ umbral)
+        self.var_umbral_max = tk.DoubleVar(
+            value=float(vivo.get("umbral_max", UMBRAL_MAX_POR_DEFECTO)))
         self.var_ev_min = tk.DoubleVar(
             value=float(vivo.get("ev_min", EV_MINIMA_POR_DEFECTO)))
         self.var_auto = tk.BooleanVar(
@@ -418,6 +425,9 @@ class PestanaVivo(ttk.Frame):
         # filtro de la tabla: mostrar SOLO los partidos en el descanso 2Q→3Q
         self.var_solo_descanso = tk.BooleanVar(
             value=bool(vivo.get("filtro_descanso", False)))
+        # filtro por rango de Δ ("de un punto a otro"; vacío = sin límite)
+        self.var_delta_min = tk.StringVar(value=str(vivo.get("delta_min", "")))
+        self.var_delta_max = tk.StringVar(value=str(vivo.get("delta_max", "")))
         self._ventanas: dict[int, float] = {}      # evento_id -> marca al abrir
         self._apuestas_auto: set[int] = set()      # evento_id ya apostados
         # señales ya registradas en `señales` (una por evento; evita una
@@ -437,8 +447,13 @@ class PestanaVivo(ttk.Frame):
         self._construir()
         # guardar al cambiar cualquier control (van ya montados)
         for _v in (self.var_auto, self.var_intervalo, self.var_auto_apostar,
-                   self.var_umbral, self.var_ev_min, self.var_solo_descanso):
+                   self.var_umbral, self.var_umbral_max, self.var_ev_min,
+                   self.var_solo_descanso, self.var_delta_min,
+                   self.var_delta_max):
             _v.trace_add("write", lambda *_a: self._guardar_vivo())
+        # el rango de Δ repinta la tabla al escribir
+        for _v in (self.var_delta_min, self.var_delta_max):
+            _v.trace_add("write", lambda *_a: self._poblar_tabla())
 
     # ------------------------------------------------------------------ UI
     def _construir(self) -> None:
@@ -474,12 +489,25 @@ class PestanaVivo(ttk.Frame):
             variable=self.var_solo_descanso, font=F_TEXTO,
             command=self._poblar_tabla)
 
+        # filtro por rango de Δ: "de un punto a otro" (vacío = sin límite).
+        # Con el rango activo solo se ven los partidos CON predicción cuyo
+        # Δ (= predicción − línea) cae dentro del intervalo.
+        lbl_d1 = tk.Label(self._top_a, text="Δ de", font=F_TEXTO)
+        self.ent_dmin = tk.Entry(self._top_a, textvariable=self.var_delta_min,
+                                 width=5, font=F_TEXTO, justify="center",
+                                 bg=C_INPUT_BG)
+        lbl_d2 = tk.Label(self._top_a, text="a", font=F_TEXTO)
+        self.ent_dmax = tk.Entry(self._top_a, textvariable=self.var_delta_max,
+                                 width=5, font=F_TEXTO, justify="center",
+                                 bg=C_INPUT_BG)
+
         self.lbl_ultima = tk.Label(self._top_b, text="aún sin consultar",
                                    font=F_PEQUE, fg=C_SUB_FG)
         self.lbl_ping_estado = tk.Label(self._top_b, text="", font=F_PEQUE, fg=C_SUB_FG)
 
         self._controles = [lbl_liga, self.combo_liga, self.btn_ping,
-                           self.chk_auto, spin, lbl_seg, self.chk_solo_descanso]
+                           self.chk_auto, spin, lbl_seg, self.chk_solo_descanso,
+                           lbl_d1, self.ent_dmin, lbl_d2, self.ent_dmax]
         self._estado = [self.lbl_ultima, self.lbl_ping_estado]
         self._top_modo = None
         self._top.bind("<Configure>", self._repack_top)
@@ -607,13 +635,19 @@ class PestanaVivo(ttk.Frame):
         auto.pack(fill="x", pady=(0, 4))
 
         self.chk_auto_apostar = tk.Checkbutton(
-            auto, text="AUTO: apostar en el descanso (2Q→3Q) con Δ ≥",
+            auto, text="AUTO: apostar en el descanso (2Q→3Q) con Δ entre",
             variable=self.var_auto_apostar, font=F_LABEL,
             command=self.toggle_auto_apostar)
         self.chk_auto_apostar.pack(side="left")
 
+        # rango de Δ para la apuesta automática (|Δ|, ambos lados): por
+        # defecto 3–5 pts; el tope a 0 = sin límite superior (solo piso)
         tk.Spinbox(auto, from_=0.5, to=20.0, increment=0.5, width=5,
                    textvariable=self.var_umbral, font=F_TEXTO).pack(
+            side="left", padx=(2, 2))
+        tk.Label(auto, text="y", font=F_TEXTO).pack(side="left")
+        tk.Spinbox(auto, from_=0.0, to=30.0, increment=0.5, width=5,
+                   textvariable=self.var_umbral_max, font=F_TEXTO).pack(
             side="left", padx=(2, 4))
         tk.Label(auto, text="pts   y EV ≥", font=F_TEXTO).pack(side="left")
         tk.Spinbox(auto, from_=-20.0, to=60.0, increment=0.5, width=6,
@@ -832,11 +866,24 @@ class PestanaVivo(ttk.Frame):
             return 1
         return 2
 
+    def _delta_rango(self) -> tuple:
+        """(min, max) del filtro Δ; None = sin límite (vacío o no numérico)."""
+        def num(texto):
+            t = (texto or "").strip().replace(",", ".")
+            if not t:
+                return None
+            try:
+                return float(t)
+            except ValueError:
+                return None
+        return (num(self.var_delta_min.get()), num(self.var_delta_max.get()))
+
     def _poblar_tabla(self) -> None:
         seleccion = self.tree.selection()
         self.tree.delete(*self.tree.get_children())
 
         solo = bool(self.var_solo_descanso.get())
+        dmin, dmax = self._delta_rango()
         en_break = sum(1 for p in self.partidos if p.en_descanso_2q)
         try:
             self.chk_solo_descanso.config(
@@ -850,6 +897,16 @@ class PestanaVivo(ttk.Frame):
                 continue        # filtro: solo los que están en el descanso
 
             res = self._prediccion_de(p)
+            if dmin is not None or dmax is not None:
+                # rango de Δ activo: solo partidos CON predicción dentro del
+                # intervalo (Δ = predicción − línea, con signo)
+                if res is None:
+                    continue
+                d = res.diferencia
+                if dmin is not None and d < dmin:
+                    continue
+                if dmax is not None and d > dmax:
+                    continue
 
             if p.finalizado:
                 estado = "Terminado"
@@ -1074,6 +1131,10 @@ class PestanaVivo(ttk.Frame):
         except (ValueError, tk.TclError):
             umbral = UMBRAL_POR_DEFECTO
         try:
+            umbral_max = float(self.var_umbral_max.get())
+        except (ValueError, tk.TclError):
+            umbral_max = UMBRAL_MAX_POR_DEFECTO
+        try:
             ev_min = max(EV_MINIMA, float(self.var_ev_min.get()))
         except (ValueError, tk.TclError):
             ev_min = EV_MINIMA_POR_DEFECTO
@@ -1084,8 +1145,11 @@ class PestanaVivo(ttk.Frame):
                 "intervalo": intervalo,
                 "auto_apostar": bool(self.var_auto_apostar.get()),
                 "umbral": umbral,
+                "umbral_max": umbral_max,
                 "ev_min": ev_min,
                 "filtro_descanso": bool(self.var_solo_descanso.get()),
+                "delta_min": self.var_delta_min.get().strip(),
+                "delta_max": self.var_delta_max.get().strip(),
             }
             base_datos.guardar_config(cfg)
         except Exception:   # noqa: BLE001  (guardar la preferencia no puede romper la app)
@@ -1123,7 +1187,8 @@ class PestanaVivo(ttk.Frame):
                 text="AUTO: vigilo el descanso de todas las ligas…", fg=C_AZUL)
             self.lbl_oportunidad.config(
                 text="AUTO activo: se apuesta SOLO en el descanso 2Q→3Q "
-                     "(1Q y 2Q finales) cuando |Δ| ≥ el umbral y el mercado "
+                     "(1Q y 2Q finales) cuando |Δ| cae dentro del rango "
+                     "configurado (por defecto 3–5 pts) y el mercado "
                      "está abierto. La apuesta se guarda sola en APUESTAS y "
                      "se resuelve al terminar el partido.",
                 fg=C_AZUL)
@@ -1161,6 +1226,11 @@ class PestanaVivo(ttk.Frame):
             umbral = max(UMBRAL_MINIMO, float(self.var_umbral.get()))
         except (ValueError, tk.TclError):
             umbral = UMBRAL_POR_DEFECTO
+        # tope del rango (0 o negativo = sin límite superior: solo piso)
+        try:
+            umbral_max = float(self.var_umbral_max.get())
+        except (ValueError, tk.TclError):
+            umbral_max = UMBRAL_MAX_POR_DEFECTO
         try:
             ev_min = max(EV_MINIMA, float(self.var_ev_min.get())) / 100.0   # el control va en %
         except (ValueError, tk.TclError):
@@ -1295,6 +1365,10 @@ class PestanaVivo(ttk.Frame):
                 continue
             if abs(res.diferencia) < umbral:
                 rechazar(p, f"|Δ| {abs(res.diferencia):.1f} < {umbral:.1f}")
+                continue
+            if umbral_max > 0 and abs(res.diferencia) > umbral_max:
+                rechazar(p, f"|Δ| {abs(res.diferencia):.1f} > "
+                            f"{umbral_max:.1f} (fuera del rango)")
                 continue
 
             # --- ¿la casa tiene ABIERTO el lado que queremos jugar? ---
@@ -1888,6 +1962,17 @@ class PestanaApuestas(ttk.Frame):
                   command=self.liquidarManual).pack(side="left", padx=(0, 6))
         tk.Button(botones, text="📄 Exportar CSV", font=F_TEXTO, width=16,
                   command=self.exportarCSV).pack(side="left", padx=(0, 6))
+        # filtro por rango de Δ ("de un punto a otro"; vacío = sin límite)
+        tk.Label(botones, text="Δ de", font=F_TEXTO).pack(side="left", padx=(0, 2))
+        self.var_dmin = tk.StringVar()
+        tk.Entry(botones, textvariable=self.var_dmin, width=5, font=F_TEXTO,
+                 justify="center", bg=C_INPUT_BG).pack(side="left")
+        tk.Label(botones, text="a", font=F_TEXTO).pack(side="left", padx=2)
+        self.var_dmax = tk.StringVar()
+        tk.Entry(botones, textvariable=self.var_dmax, width=5, font=F_TEXTO,
+                 justify="center", bg=C_INPUT_BG).pack(side="left")
+        for _v in (self.var_dmin, self.var_dmax):
+            _v.trace_add("write", lambda *_a: self.refrescar())
         self.lbl_bd = tk.Label(botones, text="", font=F_PEQUE, fg=C_SUB_FG)
         self.lbl_bd.pack(side="right")
 
@@ -1905,6 +1990,22 @@ class PestanaApuestas(ttk.Frame):
             self.lbl_bd.config(text=str(exc), fg=C_ROJO_FG)
             return
 
+        # filtro por rango de Δ (el resumen de arriba es siempre sobre TODO)
+        def _num(texto):
+            t = (texto or "").strip().replace(",", ".")
+            if not t:
+                return None
+            try:
+                return float(t)
+            except ValueError:
+                return None
+        dmin, dmax = _num(self.var_dmin.get()), _num(self.var_dmax.get())
+        visibles = apuestas
+        if dmin is not None or dmax is not None:
+            visibles = [a for a in apuestas if a.diferencia is not None
+                        and (dmin is None or a.diferencia >= dmin)
+                        and (dmax is None or a.diferencia <= dmax)]
+
         r = paperbet.resumir(apuestas)
         self.labels_resumen["total"].config(text=str(r.total))
         self.labels_resumen["pendientes"].config(text=str(r.pendientes))
@@ -1918,7 +2019,7 @@ class PestanaApuestas(ttk.Frame):
                    fg=C_VERDE if r.beneficio > 0 else (C_ROJO_FG if r.beneficio < 0 else "#000000"))
 
         self.tree.delete(*self.tree.get_children())
-        for a in apuestas:
+        for a in visibles:
             fecha = a.fecha.strftime("%d/%m/%Y %H:%M") if a.fecha else ""
             tag = {"GANADA": "ganada", "PERDIDA": "perdida"}.get(a.estado, "pendiente")
             self.tree.insert("", "end", iid=str(a.id), tags=(tag,), values=(

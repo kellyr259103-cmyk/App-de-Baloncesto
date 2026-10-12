@@ -14,7 +14,8 @@
     "auto": true,
     "intervalo": 5,
     "auto_apostar": true,
-    "umbral": 2.0,
+    "umbral": 3.0,
+    "umbral_max": 5.0,
     "ev_min": 2.0,
     "filtro_descanso": false
   },
