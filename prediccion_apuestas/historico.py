@@ -74,6 +74,7 @@ LIGAS_API_SPORTS: dict[str, tuple[int, ...]] = {
     # --- con región ---
     "argentina/lnb": (18,),                # Liga A / Argentina
     "austria/obl": (217,),                 # Superliga (antes ÖBL) / Austria
+    "austria/obl__w_": (218,),             # Superliga Women / Austria
     "australia/nbl": (1,),                 # NBL / Australia
     "belgium/top_division_1": (374,),      # Pro Basketball League / Belgium
     "belgium/top_division__w_": (25,),     # Top Division Women / Belgium
@@ -92,9 +93,12 @@ LIGAS_API_SPORTS: dict[str, tuple[int, ...]] = {
     "france/lfb__w_": (10,),               # LFB W / France
     "greece/a1__w_": (234,),               # A1 Women / Greece
     "germany/bbl": (40,),                  # BBL / Germany
+    "germany/dbbl__w_": (41,),             # DBBL Women / Germany
+    "germany/pro_a": (42,),                # Pro A (2ª) / Germany
     "greece/gbl": (45,),                   # Basket League / Greece
-    "hungary/nb_i__w_": (47,),             # NB I A W / Hungary
     "hungary/nb_i_a": (46,),               # NB I A / Hungary
+    "hungary/nb_i__w_": (47,),             # NB I A W / Hungary
+    "italy/a2__w_": (243, 244,),           # Serie A2 Women N/S / Italy
     "italy/lega_a": (52,),                 # Lega A / Italy
     "italy/a1__w_": (53,),                 # Serie A1 W / Italy
     "italy/serie_a2": (242,),              # Serie A2 / Italy
@@ -107,6 +111,7 @@ LIGAS_API_SPORTS: dict[str, tuple[int, ...]] = {
     "new_zealand/tauihi_basketball_aotearoa__w_": (375,),   # Tauihi W / Nueva Zelanda
     "norway/blno": (68,),                  # BLNO / Norway
     "philippines/pba": (151, 152, 153,),   # Philippine/Governors/Commissioners Cup
+    "poland/1_liga": (71,),                # 1 Liga (2ª) / Poland
     "poland/plk": (72,),                   # Energa Basket Liga / Poland
     "poland/1_liga": (71,),                # 1 Liga (2ª división) / Poland
     "portugal/campeonato_nacional_2": (261,),   # Proliga / Portugal
@@ -116,6 +121,7 @@ LIGAS_API_SPORTS: dict[str, tuple[int, ...]] = {
     "portugal/taca_de_portugal__w_": (400,),    # Taca de Portugal Women
     "south_korea/kbl": (91,),              # KBL / South Korea
     "spain/leb_oro": (95,),                # Primera FEB (antes LEB Oro) / Spain
+    "spain/leb_plata": (96,),              # Segunda FEB (antes LEB Plata) / Spain
     "spain/liga_acb": (117,),              # ACB / Spain
     "spain/liga_femenina__w_": (94,),      # Liga Femenina W / Spain
     "sweden/basketligan__w_": (97,),       # Basketligan W / Sweden
@@ -124,7 +130,16 @@ LIGAS_API_SPORTS: dict[str, tuple[int, ...]] = {
     "turkey/super_league": (104,),         # Basketbol Süper Ligi / Turkey
     "turkey/tbl": (102,),                  # TBL (2ª división) / Turkey
     "united_kingdom/super_league_basketball": (108,),   # SLB / Reino Unido
+    "united_kingdom/women_super_league_basketball__w_": (109,),   # SLB Women
 }
+
+# Claves que hoy no tienen traducción a API-Sports (o la tienen pero esa liga
+# todavía no publica estadísticas). Siguen siendo apostables: caen al modelo
+# del Excel (NBA/EUROLIGA) hasta que encuentren su id con
+# `python descubrir_ligas.py <texto>`.
+#   germany/dbbl__w_ (41), germany/pro_a (42) e italy/a2__w_ (243,244) YA están
+#   en el mapa: API-Sports aún no les da estadísticas, así que cuestan 0
+#   peticiones y se entrenarán solas en cuanto las publiquen.
 
 # Claves que publica la casa pero que NO son ligas: son mercados de series
 # (p. ej. "¿quién gana la serie?"). No se pueden entrenar ni apostar como un
@@ -427,7 +442,9 @@ def main() -> int:
     args = p.parse_args()
 
     def avance(que, n):
-        extra = "" if n is None else f" → {n} partidos"
+        # `n` es el número de partidos, o un mensaje cuando algo ha ido mal
+        extra = "" if n is None else (f" → {n} partidos" if isinstance(n, int)
+                                      else f" → {n}")
         print(f"   {que}{extra}", flush=True)
 
     print(f"Descargando de API-Sports (temporadas: {args.temporadas}"

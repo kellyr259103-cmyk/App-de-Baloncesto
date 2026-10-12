@@ -24,7 +24,7 @@ from typing import Callable, Optional
 
 import base_datos
 import paperbet
-import resultados
+import resultados_api as resultados
 
 
 def _edad_horas(apuesta) -> float:

@@ -46,7 +46,7 @@ def _cuartos() -> dict[str, tuple[float, float]]:
         conn.close()
     try:
         import historico
-        import resultados as rm
+        import resultados_api as rm
         d = historico._Cliente().get("games", date=HOY)
         juegos = []
         for g in d.get("response") or []:

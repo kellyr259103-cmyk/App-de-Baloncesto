@@ -22,22 +22,34 @@ import sys
 import api_betplay
 import historico
 import modelos
-import resultados
+import resultados_api as resultados
 
-# claves de BetPlay que hoy no se pueden entrenar
-SIN_TRADUCCION = ("austria/obl", "latvian-estonian_league", "lithuania/lkl",
-                  "nba_preseason", "new_zealand/tauihi_basketball_aotearoa__w_",
-                  "united_kingdom/super_league_basketball")
 
-# palabras con las que se puede llamar a cada una en API-Sports
+def ligas_sin_traduccion() -> list[tuple[str, int]]:
+    """Ligas que publica la casa AHORA y no están en `LIGAS_API_SPORTS`.
+
+    Se lee el feed en vivo en lugar de llevar una lista fija: el feed cambia
+    a lo largo del día (entran y salen ligas según la hora), así que lo que
+    hay que buscar se calcula en cada ejecución.
+    """
+    crudo = api_betplay._get_json(api_betplay.url_deporte())
+    salen: dict[str, int] = {}
+    for b in crudo.get("events", []) or []:
+        p = api_betplay._parsear_evento(b)
+        if p.clave_liga in salen or p.clave_liga in historico.LIGAS_API_SPORTS:
+            continue
+        if p.clave_liga in historico.NO_SON_LIGAS:
+            continue
+        salen[p.clave_liga] = p.liga_nombre or p.clave_liga
+    return sorted(salen.items())
+
+# palabras con las que se puede llamar a cada una en API-Sports.
+# Se recalculan según lo que falte hoy; consultar con
+# `python cobertura_ligas.py` (sección C) cuáles son.
 SUGERENCIAS = {
-    "austria/obl": ("austria", "bundesliga", "öbl", "obl"),
-    "latvian-estonian_league": ("latvia", "estonia", "lebl", "baltic"),
-    "lithuania/lkl": ("lithuania", "lkl"),
-    "nba_preseason": ("nba",),
-    "new_zealand/tauihi_basketball_aotearoa__w_": ("zealand", "tauihi", "aotearoa"),
-    "united_kingdom/super_league_basketball": ("kingdom", "super league", "britain",
-                                               "england"),
+    "club_tournaments/arabian_gulf_club_championship": ("asia", "wasl", "gulf", "arab"),
+    "italy/serie_b": ("italy", "b nazionale"),
+    "morocco/division_1": ("moroc", "maroc"),
 }
 
 
@@ -187,7 +199,15 @@ def main() -> int:
     if "--auto" in sys.argv:
         return auto()
     buscados = [s.lower() for s in sys.argv[1:]]
-    claves = SIN_TRADUCCION if not buscados else []
+    claves: list[tuple[str, int]] = []
+    if not buscados:
+        print("Leyendo el feed de la casa para ver qué falta (1 petición)…")
+        try:
+            claves = ligas_sin_traduccion()
+        except api_betplay.ErrorAPI as exc:
+            print("ERROR al leer el feed:", exc)
+            return 1
+        print(f"   {len(claves)} liga(s) del feed sin traducción\n")
 
     print("Descargando el listado de ligas de API-Sports (1 petición)…")
     try:
@@ -205,8 +225,8 @@ def main() -> int:
         print("=" * 78)
         print("LIGAS QUE FALTAN — candidatos ordenados por parecido")
         print("=" * 78)
-        for clave in claves:
-            print(f"\n  ► {clave}")
+        for clave, nombre in claves:
+            print(f"\n  ► {nombre}  [{clave}]")
             if clave in ya_traducidas:
                 print("     (ya tiene traducción, no hace falta)")
                 continue
@@ -221,7 +241,7 @@ def main() -> int:
             if not encontradas:
                 print("     ✗ NINGÚN candidato: hay que buscarlo a mano")
                 continue
-            for l in encontradas[:6]:
+            for l in encontradas[:10]:
                 temps = temporadas_con_datos(l)
                 print(f"     id {str(l.get('id')):5s}  {l.get('name')} "
                       f"({(l.get('country') or {}).get('name')})")

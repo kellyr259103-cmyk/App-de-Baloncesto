@@ -347,7 +347,7 @@ def parte_b() -> None:
     if faltan:
         try:
             import historico
-            import resultados as res_mod
+            import resultados_api as res_mod
             d = historico._Cliente().get("games", date=HOY.isoformat())
             juegos = []
             for g in d.get("response") or []:

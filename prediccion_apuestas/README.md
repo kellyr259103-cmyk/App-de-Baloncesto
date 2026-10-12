@@ -66,13 +66,28 @@ o doble clic en **`iniciar.bat`**.
      (`/listView/basketball.json`), no 35.
 2. Pulsa **PING AHORA** (o marca **Automático cada N s**, por defecto 5 s).
 3. La tabla se lista con **Liga**, 1Q, 2Q, total, línea, **Pred.**, **Δ** y cuotas
-   Over/Under, y se ordena sola:
-   - **Grupo 0** (fila azul = *oportunidad*): 1Q **y** 2Q acabados y con la línea
-     todavía comparable → ordenado por tamaño de `Δ = predicción − línea`.
-   - **Grupo 1**: señal solo con 1Q, o partido ya en 4º cuarto (entonces la línea
-     de la casa ya se ha reajustado y no es comparable).
-   - **Grupo 2**: sin predicción todavía.
-4. La banda superior muestra siempre **la mayor diferencia** del grupo 0.
+   Over/Under, y va **separada en etapas**, con una **cabecera de sección** antes
+   de cada una, para distinguir de un vistazo lo que ya está en descanso de lo
+   que aún no ha llegado ni al 2º cuarto:
+
+   | Sección | Qué es | ¿Se puede apostar? |
+   |---|---|---|
+   | ⏸ **EN DESCANSO 2Q→3Q** (filas en amarillo) | El partido ha parado tras el 2º cuarto | **Sí — AHORA**, es lo que el bot apuesta |
+   | ▶ **EN 1Q** | Falta que termine el 2º cuarto | No: no hay dos cuartos que sumar |
+   | ▶ **EN 2Q** | Jugando, pronto llega el descanso | No todavía |
+   | … **3Q / 4T / prórroga** | La ventana se cerró | No: la línea ya se ha reajustado |
+   | · **Por jugar o terminado** | Aún no empieza o ya acabó | No |
+
+   Dentro de cada etapa, los partidos se ordenan por tamaño de
+   `Δ = predicción − línea` (los que no tienen predicción van al final).
+   La etapa 0 usa **el mismo criterio que el bot**
+   (`descansos.en_ventana_descanso`), así que la tabla y la ventana de apuesta
+   nunca se contradicen.
+
+4. La banda superior muestra siempre **la mayor diferencia**. Si hay algo en
+   descanso lo anuncia como **"⏱ EN DESCANSO —"**; si no, avisa con qué etapa
+   está y por qué todavía no es comparable (*"aún en 1Q: falta que termine el
+   2Q"*, *"ya en 3Q/4T: la línea de la casa se ha reajustado"*…).
 5. Selecciona un partido: se rellenan solos **1Q**, **2Q** y **línea**, y se calcula
    la predicción con el modelo del desplegable **Modelo**, que por defecto está en
    **AUTO (por liga)** (ver más abajo).
@@ -107,34 +122,60 @@ Fuente de datos: **API-Sports** (`https://v1.basketball.api-sports.io`), token e
 
 `python cobertura_ligas.py --comprobar` comprueba que **cada liga que publica la
 casa** puede apostarse por el bot (sale con código 1 si alguna se queda sin
-modelo, así sirve de test). Hoy: **25 de 25** — 24 con modelo propio y NBA
-Pretemporada con el de la NBA.
+motor, así sirve de test). Hoy: **33 de 33** — 26 con modelo propio y 7 con el
+de otra liga. Total: **44 modelos entrenados con 13.205 partidos**.
+
+> El feed **cambia a lo largo del día**: a mediodía publica 33-34 ligas (muchas
+> femeninas y de segunda división) y por la noche 25. `cobertura_ligas.py` avisa
+> cuando entra una nueva, y `descubrir_ligas.py` (sin argumentos) lee el feed y
+> busca el id de las que falten.
+
+El informe separa cinco casos:
+
+| | Significado | ¿El bot apuesta? |
+|---|---|---|
+| **A** | Con **su** modelo (n ≥ 30 partidos de esa liga) | Sí |
+| **B** | Traducida y con datos en API-Sports, pero sin bajar/entrenar | **No** → `historico.py --ligas <clave> --cubrir 120 --guardar --entrenar` |
+| **B'** | Traducida, pero API-Sports aún no publica sus estadísticas | Sí, con el modelo del Excel |
+| **C** | Sin traducción a API-Sports | Sí, con el modelo del Excel |
+| **D** | Resueltas con el modelo de otra liga (NBA/EUROLIGA) | Sí, y lo avisa |
+| **E** | No son ligas (`wnba_series_markets`) | Se ignoran |
 
 Cómo se llegó ahí:
 
-- **Mapa ampliado** (`historico.LIGAS_API_SPORTS`): se añadieron 7 ligas que
-  estaban en el feed sin traducción a API-Sports — Austria/ÖBL (217),
-  Lituania/LKL (60), Reino Unido/SLB (108), Letonia-Estonia/LEBL (204),
-  Nueva Zelanda/Tauihi (375), Japón/B2 (407) y Portugal/LPB (74). Los ids se
-  hallaron con `descubrir_ligas.py`, que baja el listado completo de
-  API-Sports (1 petición) y busca por nombre.
+- **Mapa ampliado** (`historico.LIGAS_API_SPORTS`): 20 ligas añadidas tras
+  hallarlas con `descubrir_ligas.py`, que baja el listado completo de API-Sports
+  (1 petición) y busca por nombre. Por ejemplo: Austria/ÖBL (217),
+  Austria/ÖBL Femenina (218), Bélgica Femenina (25), Chequia (32), Hungría
+  NB I A (46) y su versión femenina (47), Lituania/LKL (60), México/LNBP (63),
+  Polonia 1 Liga (71), Portugal/LPB (74), Reino Unido/SLB (108) y SLB Women
+  (109), Suecia/Superettan (99), España/Liga Femenina (94), Japón/B2 (407)…
 
-  > El feed **cambia a lo largo del día**: aparecen y desaparecen ligas según
-  > la hora. `cobertura_ligas.py --comprobar` es lo que avisa cuando entra una
-  > nueva, y `descubrir_ligas.py <texto>` halla su id en un minuto.
+  Tres ligas quedan **mapeadas sin poder entrenarse** (B') porque API-Sports aún
+  no les da estadísticas — cuestan **0 peticiones** y se entrenan solas en cuanto
+  las publiquen: Alemania Pro A (42), Alemania DBBL Women (41), Italia A2
+  Women (243, 244) y España/Segunda FEB (96).
+
+  Otras tres **no existen en API-Sports** y se quedan con el respaldo del Excel:
+  `italy/serie_b`, `morocco/division_1` y
+  `club_tournaments/arabian_gulf_club_championship`.
 
 - **Reserva de temporadas** (`historico.descargar_liga(--cubrir N)`): si con las
   temporadas pedidas no llegan las muestras, **sigue bajando temporadas
   anteriores** hasta alcanzar el mínimo o agotarlas. Es lo que permitió entrenar
-  las ligas de temporada reciente:
+  las ligas de temporada reciente (una temporada apenas empezada trae 7-30
+  partidos):
 
-  | Liga | Temporada actual | Temporada anterior | Total |
+  | Liga | Temporada actual | Se bajó la anterior | Total |
   |---|---|---|---|
-  | Lituania / LKL | 18 partidos | +159 | 177 |
-  | Reino Unido / SLB | 17 | +148 | 165 |
-  | Letonia-Estonia / LEBL | 26 | +192 | 218 |
-  | Nueva Zelanda / Tauihi | 7 | +33 +33 +34 | 107 |
-  | Austria / ÖBL | 180 (suficiente) | — | 180 |
+  | Nueva Zelanda / Tauihi | 7 partidos | +33 +33 +34 | 107 |
+  | Reino Unido / SLB Women | 9 | +94 +115 | 218 |
+  | Austria / ÖBL Femenina | 11 | +69 +46 | 126 |
+  | Bélgica Femenina | 12 | +146 | 158 |
+  | Polonia / 1 Liga | 28 | +294 | 322 |
+  | Lituania / LKL | 18 | +159 | 177 |
+  | Portugal / LPB | 9 | +147 | 156 |
+  | México / LNBP | 188 (suficiente) | — | 188 |
 
 - **`wnba_series_markets` no es una liga** (son mercados de series): pasa a
   `historico.NO_SON_LIGAS` y se ignora en lugar de buscarle un id inexistente.
@@ -285,6 +326,50 @@ una línea en `log/auto_apuestas.log` (excluido de git) en cada decisión:
 
 
 
+### 6.4 Resolución de las apuestas — memoria de resultados (`resultados.py`)
+
+El feed de la casa es la **cartelera del día**: en cuanto un partido termina
+sale de la lista **y no deja consultar uno concreto** (`event/{id}.json`
+responde 404, verificado). La resolución original solo miraba los partidos
+del sondeo, así que si la app no llegaba a leer el marcador en esa ventana
+breve —o estaba cerrada en ese momento—, la apuesta se quedaba **PENDIENTE
+para siempre**. Ahora hay tres fuentes, en este orden:
+
+| # | fuente | cuándo la usa | coste |
+|---|---|---|---|
+| 1 | feed del sondeo | siempre, primero | 0 (el ping ya se hace) |
+| 2 | tabla `resultados` (memoria) | el partido ya salió del feed | 0 (una consulta) |
+| 3 | API-Sports | sigue sin marcador en las dos anteriores | 1 petición/fecha, como mucho cada 10 min |
+
+- **Se guarda en cuanto se ve**: cada sondeo apunta en `resultados` el total
+  final de los partidos acabados. Solo si la casa los da por terminados, o si
+  los cuatro cuartos cuadran con el marcador: una **prórroga pendiente** no se
+  guarda, porque ese marcador aún no es el final.
+- **Se resuelve al arrancar**: al abrir la app se resuelven enseguida las
+  pendientes que tengan marcador guardado, sin esperar al primer ping.
+- **Recuperación**: lo que siga fuera del feed se busca en API-Sports **por
+  fecha**, acotando la candidatura a la liga de la apuesta y exigiendo un
+  margen claro sobre el segundo mejor. Si no hay coincidencia fiable **no se
+  inventa** el resultado: la apuesta sigue pendiente.
+- El origen queda anotado en la `nota`: `· resultado recuperado de API-Sports
+  (el partido ya había salido del feed)`.
+- El botón «✔ Resolver pendientes» antes solo miraba la BBL del prototipo
+  (`obtener_partidos()` sin liga), así que casi nunca resolvía nada; ahora
+  recorre feed + memoria + API-Sports.
+
+```
+python resultados.py                  # informe: qué queda pendiente y por qué
+python resultados.py -v               # idem, con la puntuación de cada candidato
+python resultados.py --aplicar        # resuelve las recuperables
+python diagnostico_resolucion.py      # las 3 fuentes para cada pendiente
+```
+
+> **Ejemplo real.** Un día la app estuvo cerrada justo cuando terminaron sus
+> partidos y **36 apuestas se quedaron PENDIENTE** sin forma de resolverlas.
+> Con este cambio, de las 37 pendientes se recuperaron **35**: las 2 que
+> quedan son un partido de una liga que API-Sports no cubre (Marruecos /
+> Division 1) y otro que todavía se está jugando.
+
 ### 7. Backtest walk-forward (`backtest.py`) — ¿cómo nos habría ido en 2026?
 
 Responde "si hubiéramos usado esta estrategia en 2026, ¿qué winrate tendríamos?",
@@ -338,6 +423,7 @@ python backtest.py --ligas nba euroleague --detallado
 | `historico.py` | Descarga el histórico de partidos acabados (con cuartos) desde API-Sports. |
 | `modelos.py` | Entrena un modelo MCO por liga con holdout y lo guarda/recupera de PostgreSQL. |
 | `descansos.py` | Regla del descanso 2Q→3Q: ventana, duración por liga, caducidad y autocalibración. |
+| `resultados.py` | Memoria de los resultados finales: guarda el marcador en cuanto se ve y resuelve (o recupera de API-Sports) las apuestas cuyo partido ya salió del feed. |
 | `backtest.py` | Backtest walk-forward de la estrategia del descanso (winrate por liga/umbral). |
 | `diagnostico_backtest.py` | Mide la reversión a la media entre mitades (de dónde sale el edge del backtest). |
 | `config.json` | Conexión a PostgreSQL y token de API-Sports (se crea solo). |
@@ -349,6 +435,8 @@ python backtest.py --ligas nba euroleague --detallado
 | `prueba_gui_ligas.py` | Prueba de la pestaña EN VIVO con selector de ligas y modo "todas". |
 | `prueba_descansos.py` | Prueba de la regla del descanso: ventana, duración, caducidad y decisión. |
 | `prueba_auto_descanso.py` | Prueba del circuito automático: descanso → apuesta sola → resolución. |
+| `prueba_resultados.py` | Prueba de la memoria de resultados: guardar el marcador y resolver un partido que ya salió del feed. |
+| `diagnostico_resolucion.py` | Diagnóstico: por qué sigue pendiente cada apuesta y qué fuente le falta. |
 | `configurar_postgres.ps1` | Prepara PostgreSQL (contraseña y base `paperbet`). |
 | `iniciar.bat` | Lanza la aplicación. |
 
@@ -422,17 +510,20 @@ python prueba_descansos.py   # regla del descanso 2Q→3Q: ventana, duración, c
 python prueba_auto_descanso.py  # circuito automático: descanso → apuesta sola → resolución
 python prueba_automatico.py     # arranque solo (AUTO + 5 s) + ventana responsive
 python prueba_disponibilidad.py # la casa no tiene el lado disponible / EV negativo
+python prueba_resultados.py     # memoria de resultados: marcador guardado -> resolución
 python auditoria_auto.py        # auditoría real: motivos, mercados y valor esperado
 python cobertura_ligas.py       # qué ligas del feed tienen motor (A/B/C/D/E)
 python cobertura_ligas.py --comprobar   # test: exit 1 si alguna liga se queda sin modelo
 python descubrir_ligas.py       # halla el id de API-Sports de una liga que falta
+python resultados.py            # informe: apuestas pendientes y sus 3 fuentes (1 petición)
+python diagnostico_resolucion.py # por qué sigue pendiente cada apuesta
 ```
 
 Las de GUI (`prueba_bd.py`, `prueba_gui.py`, `prueba_gui_ligas.py`,
-`prueba_auto_descanso.py`, `prueba_automatico.py`) borran las apuestas de prueba
-al terminar.
-`prueba_historico.py` gasta ~4 peticiones de la cuota diaria de API-Sports y
-`prueba_modelos.py` ~2.
+`prueba_auto_descanso.py`, `prueba_automatico.py`, `prueba_resultados.py`)
+borran las apuestas de prueba al terminar.
+`prueba_historico.py` gasta ~4 peticiones de la cuota diaria de API-Sports,
+`prueba_modelos.py` ~2 y `resultados.py` 1 por fecha pendiente.
 
 ## Diferencias respecto al Excel (a propósito)
 
@@ -467,6 +558,7 @@ Headers Origin y Referer: https://betplay.com.co/    (sin cookies ni login)
 | `/listView/basketball/germany/bbl/all/matches.json` | Partidos de una liga **bajo un país** (3 niveles). |
 | `/listView/basketball/nba.json` | Partidos de una liga **terminal sin país** (2 niveles). |
 | `/listView/basketball.json` | **Todo el deporte** en una petición (~95 partidos). Es lo que usa el modo *TODAS LAS LIGAS*. |
+| `/event/{id}.json` | **No existe** (404). Por eso hay que guardar el marcador en cuanto se ve: ver §6.4. |
 
 Los mismos `termKey` sirven para descargar todas las ligas con cuotas a disco:
 el script `apuestas_cache/kambi_ligas.py` (ver `apuestas_cache/README.md`).
@@ -484,6 +576,7 @@ el script `apuestas_cache/kambi_ligas.py` (ver `apuestas_cache/README.md`).
 | Descanso 2Q | `periodId=QUARTER2`, `running=false`, `left=0:0`, línea y mercados `OPEN`. |
 | Transición capturada | `QUARTER2` (`running=false`, `left=0:0`) → `QUARTER3` 25 s después. |
 | Resolución | Al final: `state != STARTED/NOT_STARTED`, o bien `Q4` con reloj parado a ≥ 40:00. |
+| Retirada | La casa **borra cada partido de la lista en cuanto termina** y `event/{id}.json` devuelve 404: el marcador se guarda en la tabla `resultados` apenas se ve (§6.4). |
 
 **Intervalo recomendado:** 5 s en vivo / 60 s prepartido, con *backoff* si llega 429.
 
@@ -524,6 +617,22 @@ CREATE TABLE IF NOT EXISTS apuestas (
 );
 ```
 
+Y la memoria que hace falta para resolver aunque la casa retire el partido
+(§6.4):
+
+```sql
+CREATE TABLE IF NOT EXISTS resultados (
+    evento_id BIGINT PRIMARY KEY,   -- id del partido en el feed
+    partido   TEXT, liga TEXT,
+    total     DOUBLE PRECISION NOT NULL,   -- total final (con prórroga)
+    fuente    TEXT NOT NULL DEFAULT 'feed',   -- 'feed' | 'apisports'
+    capturado TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+```
+
+Hay además `muestras` (cuartos para entrenar), `modelos_liga` (un MCO por
+liga) y `descansos_liga` (autocalibración del descanso).
+
 ---
 
 # Integridad de datos y calibración (11-10-2026)
@@ -537,7 +646,7 @@ el bot volvía a apostar partidos que seguían en su descanso de ~15 min
 (duplicados reales: ids 6/14, 8/13, 9/17, 10/16, 11/15). Ahora, antes de
 apostar, `_auto_apostar_en_descanso` comprueba `base_datos.existe_apuesta()`.
 
-## 2. Liquidación con resultado OFICIAL (`resultados.py` + `reconciliacion.py`)
+## 2. Liquidación con resultado OFICIAL (`resultados_api.py` + `reconciliacion.py`)
 Kambi deja `running=True` en el pitido, a veces da totales imprecisos
 (prórrogas, reloj con retraso: hubo un 176 registrado sobre un partido de 205
 y un U21 colándose por el senior) y elimina el evento sin estado final (las

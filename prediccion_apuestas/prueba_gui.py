@@ -100,6 +100,10 @@ a.update()
 despues = base_datos.estadisticas_bd()["apuestas"]
 print(f"   filas en la BD antes={antes}  después={despues}")
 assert despues == antes + 1, "la apuesta no se guardó"
+# id de la apuesta de ESTA prueba. La BD puede contener apuestas reales que la
+# app haya puesto mientras tanto, y hay que dejarlas intactas.
+mia = max(ap.id for ap in base_datos.listar_apuestas())
+print(f"   apuesta de esta prueba: id={mia}")
 print(f"   diálogo mostrado: {avisos[-1][1] if avisos else '(ninguno)'}")
 for av in avisos:
     if av[0] == "info":
@@ -133,14 +137,27 @@ print(f"   apuestas resueltas: {n}")
 for iid in a.pestana_apuestas.tree.get_children():
     print("   ", a.pestana_apuestas.tree.item(iid, "values"))
 pendientes = base_datos.apuestas_pendientes()
-assert not pendientes, "quedan apuestas pendientes sin resolver"
+# lo que hay que comprobar es que se ha resuelto LA DE ESTA PRUEBA; las
+# apuestas reales de la app sobre otros partidos no tienen por qué resolverse
+assert all(ap.id != mia for ap in pendientes), \
+    f"la apuesta de prueba {mia} sigue pendiente"
+otros = [ap for ap in pendientes if ap.id != mia]
+if otros:
+    print(f"   quedan {len(otros)} apuestas reales de la app (sin tocar): "
+          f"ids {[ap.id for ap in otros]}")
+print("   la apuesta de la prueba quedó resuelta: OK")
 
 print("\n" + "=" * 72)
-print("7) LIMPIEZA (borrar la apuesta de prueba)")
+print("7) LIMPIEZA (borrar SOLO la apuesta de prueba)")
 print("=" * 72)
+antes_limpiar = base_datos.estadisticas_bd()["apuestas"]
 for ap in base_datos.listar_apuestas():
-    base_datos.eliminar_apuesta(ap.id)
-print(f"   filas restantes: {base_datos.estadisticas_bd()['apuestas']}")
+    if ap.id == mia:
+        base_datos.eliminar_apuesta(ap.id)
+despues_limpiar = base_datos.estadisticas_bd()["apuestas"]
+print(f"   borradas: {antes_limpiar - despues_limpiar} · "
+      f"quedan {despues_limpiar} (las de la app, intactas)")
+assert despues_limpiar == antes_limpiar - 1, "no se borró exactamente la de prueba"
 
 a.destroy()
 print("\nPRUEBA DE GUI OK")

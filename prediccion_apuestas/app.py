@@ -27,6 +27,7 @@ import descansos
 import historico
 import motor
 import paperbet
+import resultados
 from motor import Modelo, parsear, predecir, fecha_excel_a_texto
 from paperbet import Apuesta
 
@@ -45,6 +46,8 @@ C_ROJO_BG = "#FFC7CE"
 C_ROJO_FG = "#C00000"
 C_AZUL = "#1F4E79"
 C_AZUL_CLARO = "#DDEBF7"
+C_DESCANSO_BG = "#FFF2CC"    # filas en el descanso 2Q→3Q (apostables ya)
+C_GRUPO_BG = "#E7E6E6"       # cabeceras de sección de la tabla
 
 F_TITULO = ("Calibri", 15, "bold")
 F_SUB = ("Calibri", 9, "italic")
@@ -64,6 +67,7 @@ STAKE_POR_DEFECTO = 10000
 UMBRAL_MINIMO = 2.0                 # Δ mínimo que la app permite usar
 EV_MINIMA = 0.0                     # EV mínimo que la app permite usar (%)
 INTERVALO_POR_DEFECTO = 5          # segundos entre pings automáticos
+INTERVALO_RECUPERACION = 600       # seg. mínimos entre búsquedas en API-Sports
 UMBRAL_POR_DEFECTO = 2.0           # Δ mínimo (pts) para apostar solo en el descanso
 # Valor esperado mínimo. 0.0 = que la apuesta sea +EV con la cuota que ofrece
 # la casa (con su margen del ~8%, un Δ pequeño puede ser -EV igualmente).
@@ -390,6 +394,11 @@ class PestanaVivo(ttk.Frame):
         self._ping_en_curso = False
         self._auto_activo = False
         self._job_auto = None
+        # recuperación de apuestas cuyo partido ya salió del feed (ver
+        # `resultados.py`): con suave para no gastar la cuota de API-Sports
+        self._recuperando = False
+        self._ultima_recuperacion = 0.0
+        self._resolviendo_inicio = False
         self._partido_sel: api_betplay.Partido | None = None
         # --- apuesta automática en el descanso 2Q→3Q ---
         # Se recuerda entre sesiones: si la dejaste encendida, al abrir la app
@@ -504,6 +513,10 @@ class PestanaVivo(ttk.Frame):
         except tk.TclError:
             pass
         self.tree.tag_configure("oportunidad", background=C_AZUL_CLARO)
+        # filas en el descanso (las únicas apostables AHORA) y cabeceras
+        self.tree.tag_configure("descanso", background=C_DESCANSO_BG)
+        self.tree.tag_configure("etapa", background=C_GRUPO_BG,
+                                foreground=C_AZUL)
 
         # --- flujo de predicción ---
         flujo = tk.LabelFrame(self, text=" FLUJO: activar predicción con 1Q + 2Q ",
@@ -738,6 +751,10 @@ class PestanaVivo(ttk.Frame):
         # histórico de líneas/cuotas reales (base para backtests honestos)
         self._eventos_feed = {p.evento_id for p in partidos}
         self._registrar_cuotas(partidos)
+        # guardar el marcador final en cuanto la casa lo enseña: después el
+        # partido sale del feed y no hay forma de volver a leerlo (ver
+        # resultados.py)
+        self.guardar_resultados_en_hilo(partidos)
         # guardar los partidos acabados con sus cuartos (muestras de entrenamiento)
         self.recolectar_en_hilo(partidos)
         # resolver automáticamente las apuestas pendientes de partidos terminados
@@ -747,6 +764,9 @@ class PestanaVivo(ttk.Frame):
                 text=f"{len(partidos)} partidos · {vivos} en vivo · "
                      f"{resueltas} apuesta(s) resuelta(s)", fg=C_VERDE)
             self.app.refrescar_apuestas()
+        # lo que ya no está en el feed (la casa lo retiró) se va a buscar a
+        # API-Sports, como mucho una vez cada 10 minutos
+        self._recuperar_huerfanas(partidos)
         # apuesta automática en el descanso 2Q→3Q (si está activada)
         self._auto_apostar_en_descanso(partidos)
         # reconciliación oficial cada ~10 min: cierra las colgadas (evento
@@ -762,22 +782,55 @@ class PestanaVivo(ttk.Frame):
                     break
             self.calcular_flujo()
 
+    # Cabeceras de sección de la tabla, en el MISMO orden que devuelve
+    # `grupo_fila`. Una por grupo, para separar de un vistazo lo que ya está
+    # en descanso de lo que aún no ha llegado ni al 2Q.
+    ETAPAS = (
+        "⏸  EN DESCANSO 2Q→3Q · el bot puede apostar YA",
+        "▶  EN 1Q · falta que termine el 2º cuarto",
+        "▶  EN 2Q · jugando, pronto es el descanso",
+        "…  3Q / 4T / prórroga · ventana cerrada, la línea ya cambió",
+        "·  Por jugar o terminado",
+    )
+
+    # Por qué el partido de esa etapa NO se puede comparar todavía
+    PIES = {
+        0: "",
+        1: " (aún en 1Q: falta que termine el 2Q)",
+        2: " (aún en el 2Q: todavía no es el descanso)",
+        3: " (ya en 3Q/4T: la línea de la casa se ha reajustado)",
+        4: " (por jugar o terminado)",
+    }
+
     @staticmethod
     def grupo_fila(p, res) -> int:
         """
-        Grupo de ordenación de una fila:
+        Etapa del partido: decide el ORDEN y las CABECERAS DE SECCIÓN de la
+        tabla de EN VIVO.
 
-        0 -> señal COMPLETA (1Q y 2Q finales) y con línea todavía comparable
-             con la predicción: es el grupo del que salen las oportunidades
-        1 -> señal parcial (solo el 1Q está acabado) o ya en 4º cuarto, donde
-             la línea de la casa se ha reajustado: se listan, pero no mandan
-        2 -> sin predicción todavía
+        0 -> **en el descanso 2Q→3Q**: la ventana está abierta, así que es el
+             único grupo que el bot puede apostar AHORA. Va primero.
+        1 -> **en el 1Q**: el 2Q ni siquiera ha terminado, no hay dos cuartos
+             que sumar, así que no hay predicción posible.
+        2 -> **en el 2Q**: jugando, le queda poco al descanso.
+        3 -> ya en **3Q o después**: la ventana se cerró y la línea de la casa
+             se ha reajustado, por lo que la predicción 1Q+2Q ya no es
+             comparable con ella.
+        4 -> por jugar o terminado.
+
+        Se usa `descansos.en_ventana_descanso` (el MISMO criterio que el bot)
+        y no `p.en_descanso_2q`, para que la sección de la tabla y la ventana
+        de apuesta nunca se contradigan.
         """
-        if res is None:
-            return 2
-        if p.en_ultimo_periodo or not p.q2_completo:
+        if p.finalizado or p.es_pretemporada:
+            return 4
+        if descansos.en_ventana_descanso(p):
+            return 0
+        if p.q2_completo:
+            return 3
+        if (p.period_id or "").upper() in ("", "QUARTER1", "PERIOD1"):
             return 1
-        return 0
+        return 2
 
     def _poblar_tabla(self) -> None:
         seleccion = self.tree.selection()
@@ -843,16 +896,20 @@ class PestanaVivo(ttk.Frame):
                 f1(p.cuota_under) if p.cuota_under else "—",
                 mercado,
             )
-            # orden: (0) predecibles con línea todavía comparable, por |Δ|
-            # descendente; (1) los que ya van en 4º cuarto; (2) el resto
+            # orden por ETAPA (0 = en descanso, el único apostable ahora) y,
+            # dentro de cada etapa, por |Δ| descendente
             grupo = self.grupo_fila(p, res)
             clave_orden = (grupo, -abs(res.diferencia) if res else 0.0)
-            tag = "oportunidad" if (grupo == 0 and abs(res.diferencia) >= 5) else "normal"
+            if grupo == 0:
+                tag = "descanso"            # resaltado: apostable YA
+            elif res is not None and abs(res.diferencia) >= 5:
+                tag = "oportunidad"
+            else:
+                tag = "normal"
             filas.append((clave_orden, str(p.evento_id), valores, tag, res, p))
 
         filas.sort(key=lambda f: f[0])
-        for _orden, iid, valores, tag, _res, _p in filas:
-            self.tree.insert("", "end", iid=iid, values=valores, tags=(tag,))
+        self._insertar_con_secciones(filas)
 
         if seleccion:
             try:
@@ -861,6 +918,30 @@ class PestanaVivo(ttk.Frame):
                 pass
 
         self._mostrar_mejor_oportunidad(filas)
+
+    def _insertar_con_secciones(self, filas) -> None:
+        """
+        Rellena la tabla metiendo una CABECERA antes de cada etapa.
+
+        Así se separan de un vistazo los partidos **ya en descanso** (los que
+        el bot puede apostar ahora) de los que **aún siguen en el 1Q**, en el
+        2Q o en tramos posteriores, sin obligar a mirar columna por columna.
+
+        Las cabeceras llevan iids `__etapa_N`, que `_al_seleccionar` ignora
+        porque no son números: pulsarlas no cambia el partido seleccionado.
+        """
+        cuenta: Counter = Counter(orden[0] for orden, *_ in filas)
+        visto: set = set()
+        for orden, iid, valores, tag, _res, _p in filas:
+            grupo = orden[0]
+            if grupo not in visto:
+                visto.add(grupo)
+                titulo = f"{self.ETAPAS[grupo]}   ({cuenta[grupo]})"
+                self.tree.insert(
+                    "", "end", iid=f"__etapa_{grupo}",
+                    values=(titulo,) + ("",) * (len(self.COLUMNAS) - 1),
+                    tags=("etapa",))
+            self.tree.insert("", "end", iid=iid, values=valores, tags=(tag,))
 
     def recolectar_en_hilo(self, partidos) -> None:
         """
@@ -895,31 +976,48 @@ class PestanaVivo(ttk.Frame):
 
         self.app.en_hilo(tarea, al_terminar)
 
+    def guardar_resultados_en_hilo(self, partidos) -> None:
+        """
+        Apunta en PostgreSQL el total final de los partidos acabados.
+
+        La casa retira cada partido del feed en cuanto termina y no deja
+        consultar uno concreto, así que si no se guarda aquí el marcador en
+        esa ventana, la apuesta se quedaría PENDIENTE para siempre.
+        (Ver `resultados.py`.)
+        """
+        if not self.app.db_ok:
+            return
+        self.app.en_hilo(lambda: resultados.guardar_partidos(partidos),
+                         lambda _r: None)
+
     def _mostrar_mejor_oportunidad(self, filas) -> None:
         """Etiqueta destacada con el partido de mayor diferencia."""
         if not filas:
             self.lbl_oportunidad.config(text="Sin partidos.", fg=C_SUB_FG)
             return
-        con_datos = [f for f in filas if f[4] is not None]
+        # solo partidos EN JUEGO (etapa < 4): los terminados tienen todos sus
+        # cuartos y meterían en el banner un partido que ya no se puede jugar
+        con_datos = [f for f in filas if f[4] is not None and f[0][0] < 4]
         if not con_datos:
             vivos = sum(1 for p in self.partidos if p.es_vivo)
             self.lbl_oportunidad.config(
                 text=f"{len(self.partidos)} partidos · {vivos} en vivo. "
-                     f"Ninguno tiene todavía 1Q + 2Q completos con línea.",
+                     f"Ninguno en juego tiene todavía 1Q + 2Q completos con línea.",
                 fg=C_SUB_FG)
             return
-        comparables = [f for f in con_datos if f[0][0] == 0]
-        pie = ""
-        if not comparables:
-            # no hay ninguna señal completa: se enseña la mejor parcial,
-            # pero advirtiendo de por qué no es comparable
-            comparables = con_datos
-            pie = (" (solo con 1Q: el 2Q aún no ha terminado)"
-                   if not comparables[0][5].q2_completo else
-                   " (4º cuarto: la línea ya se ha reajustado)")
-        _orden, _iid, _v, _tag, res, p = comparables[0]
+        # si alguno está EN DESCANSO manda ese, que es el único apostable ya;
+        # si no, el mejor de la etapa más avanzada y se explica por qué falta
+        en_descanso = [f for f in con_datos if f[0][0] == 0]
+        if en_descanso:
+            elegido, pie = en_descanso[0], ""
+            cabecera = "⏱ EN DESCANSO — "
+        else:
+            elegido = con_datos[0]        # `filas` ya viene ordenado por etapa
+            pie = self.PIES.get(elegido[0][0], "")
+            cabecera = "Mayor diferencia: "
+        _orden, _iid, _v, _tag, res, p = elegido
         self.lbl_oportunidad.config(
-            text=(f"Mayor diferencia: {p.liga_nombre} · {p.nombre} — "
+            text=(f"{cabecera}{p.liga_nombre} · {p.nombre} — "
                   f"1Q {p.q1} + 2Q {p.q2}, predicción {f1(res.prediccion)} vs "
                   f"línea {f1(p.linea)} → {res.veredicto} {res.diferencia:+.1f} pts "
                   f"(P(over) {res.prob_over * 100:.0f}%){pie}"),
@@ -1494,9 +1592,28 @@ class PestanaVivo(ttk.Frame):
         )
 
     def resolver_pendientes(self) -> None:
+        """
+        Botón «✔ Resolver pendientes».
+
+        Miraba **solo la BBL** del prototipo original (`obtener_partidos()` sin
+        liga), así que casi nunca resolvía nada. Ahora recorre las tres
+        fuentes, en orden:
+          1. el feed de baloncesto entero;
+          2. la memoria de resultados (partidos que la casa ya retiró);
+          3. API-Sports, por fecha y liga, para lo que siga sin resultado.
+        """
+
         def tarea():
-            partidos = api_betplay.obtener_partidos()
-            return self._resolver_con(partidos)
+            try:
+                partidos = api_betplay.obtener_partidos_deporte("basketball")
+            except api_betplay.ErrorAPI:
+                partidos = []        # sin feed aún así se puede resolver
+            n = self._resolver_con(partidos)
+            pend = base_datos.apuestas_pendientes()
+            if pend:
+                extra, _siguen = resultados.resolver_con_api(pend)
+                n += extra
+            return n
 
         def al_terminar(res):
             if isinstance(res, Exception):
@@ -1504,8 +1621,74 @@ class PestanaVivo(ttk.Frame):
                 return
             n = res
             self.app.refrescar_apuestas()
+            quedan = len(base_datos.apuestas_pendientes())
             self.lbl_flujo_estado.config(
-                text=f"{n} apuesta(s) resuelta(s).", fg=C_VERDE if n else C_SUB_FG)
+                text=f"{n} apuesta(s) resuelta(s)"
+                     + (f" · quedan {quedan} pendientes" if quedan else ""),
+                fg=C_VERDE if n else C_SUB_FG)
+
+        self.app.en_hilo(tarea, al_terminar)
+
+    def _recuperar_huerfanas(self, partidos) -> None:
+        """
+        Apuestas pendientes cuyo partido YA NO aparece en el feed.
+
+        La casa retira cada partido en cuanto termina y no deja consultar uno
+        concreto, así que su resultado se va a buscar a API-Sports (1 petición
+        por fecha, acotada a la liga de la apuesta). Como mucho una vez cada
+        `INTERVALO_RECUPERACION` segundos, para no gastar la cuota diaria.
+        """
+        if self._recuperando or not self.app.db_ok:
+            return
+        ahora = time.time()
+        if ahora - self._ultima_recuperacion < INTERVALO_RECUPERACION:
+            return
+        en_feed = {p.evento_id for p in partidos}
+        huerfanas = [a for a in base_datos.apuestas_pendientes()
+                     if a.evento_id not in en_feed]
+        if not huerfanas:
+            return
+        self._recuperando = True
+        self._ultima_recuperacion = ahora
+
+        def tarea():
+            n, _siguen = resultados.resolver_con_api(huerfanas)
+            return n
+
+        def al_terminar(res):
+            self._recuperando = False
+            if isinstance(res, Exception) or not res:
+                return
+            self.app.refrescar_apuestas()
+            self.lbl_ping_estado.config(
+                text=(self.lbl_ping_estado.cget("text") or "") +
+                     f" · +{res} resultado(s) recuperado(s)", fg=C_VERDE)
+
+        self.app.en_hilo(tarea, al_terminar)
+
+    def resolver_al_arrancar(self) -> None:
+        """
+        Al abrir la app, resuelve enseguida las apuestas que sigan pendientes
+        con lo que haya en la memoria de resultados (0 peticiones). El resto
+        —partidos que ya salieron del feed— lo recoge `_recuperar_huerfanas`
+        en cuanto llega el primer sondeo.
+        """
+        if self._resolviendo_inicio or not self.app.db_ok:
+            return
+        if not base_datos.apuestas_pendientes():
+            return
+        self._resolviendo_inicio = True
+
+        def tarea():
+            return self._resolver_con([])
+
+        def al_terminar(res):
+            self._resolviendo_inicio = False
+            if isinstance(res, Exception) or not res:
+                return
+            self.app.refrescar_apuestas()
+            self.lbl_flujo_estado.config(
+                text=f"{res} apuesta(s) resuelta(s) al arrancar.", fg=C_VERDE)
 
         self.app.en_hilo(tarea, al_terminar)
 
@@ -1586,16 +1769,37 @@ class PestanaVivo(ttk.Frame):
         self.app.en_hilo(tarea, al_terminar)
 
     def _resolver_con(self, partidos) -> int:
+        """
+        Resuelve las apuestas pendientes cuyo partido ya ha terminado.
+
+        Mira DOS fuentes, en este orden:
+          1. el feed de este sondeo (lo que la casa enseña ahora mismo);
+          2. la memoria de resultados de `resultados.py`.
+
+        La segunda es imprescindible: el feed es la cartelera del día y retira
+        cada partido en cuanto acaba, además no deja consultar uno concreto
+        (`event/{id}.json` -> 404). Sin esa memoria, cualquier apuesta cuyo
+        partido saliera del feed entre dos sondeos se quedaría PENDIENTE para
+        siempre.
+        """
         pendientes = base_datos.apuestas_pendientes()
         if not pendientes:
             return 0
         indice = {p.evento_id: p for p in partidos}
+        guardados = resultados.detalle(a.evento_id for a in pendientes)
         resueltas = 0
         for a in pendientes:
             p = indice.get(a.evento_id)
-            if p is None or not p.finalizado or p.total_final is None:
+            if p is not None and p.finalizado and p.total_final is not None:
+                total, fuente = float(p.total_final), "feed"
+            else:
+                total, fuente = guardados.get(int(a.evento_id), (None, ""))
+            if total is None:
                 continue
-            paperbet.resolver(a, float(p.total_final))
+            paperbet.resolver(a, total)
+            if fuente == "apisports" and "API-Sports" not in (a.nota or ""):
+                a.nota = (f"{a.nota}  · resultado recuperado de API-Sports "
+                          f"(el partido ya había salido del feed)")
             base_datos.actualizar_resultado(a)
             resueltas += 1
         return resueltas
@@ -2758,6 +2962,9 @@ class App(tk.Tk):
                 self.estado.config(
                     text=self.estado.cget("text") + f"  |  ✅ {base_datos.descripcionConexion()}",
                     fg=C_SUB_FG)
+                # con la BD viva se resuelven enseguida las apuestas que
+                # seguían pendientes (ver `resolver_al_arrancar`)
+                self.pestana_vivo.resolver_al_arrancar()
             else:
                 self.estado.config(
                     text=(self.estado.cget("text") or "") +
