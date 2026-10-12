@@ -88,7 +88,10 @@ print(f"   liga de prueba: {liga_con_modelo} (n={modelo.n})")
 q1 = int(modelo.media_1q) if modelo.media_1q else 50
 q2 = int(modelo.media_2q) if modelo.media_2q else 45
 pred = modelo.predecir_dos(q1, q2)
-linea_lejos = round(pred - 12.0, 1)     # Δ = +12 -> mucho mayor que el umbral
+# Δ = +4 -> dentro del rango que la app apostará por defecto (3–5). El tope
+# máximo existe desde `UMBRAL_MAX_POR_DEFECTO`: Δ demasiado grande se toma
+# como error del modelo, no como valor, y ya no se apuesta.
+linea_lejos = round(pred - 4.0, 1)
 p_ok = partido_en_descanso(900001, q1=q1, q2=q2, linea=linea_lejos,
                            liga_tk=liga_con_modelo)
 print(f"   descanso con Δ grande: 1Q={q1} 2Q={q2} pred={pred:.1f} "

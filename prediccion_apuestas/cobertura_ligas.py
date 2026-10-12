@@ -16,6 +16,7 @@ from __future__ import annotations
 import sys
 
 import api_betplay
+import base_datos
 import historico
 import modelos
 
@@ -131,9 +132,25 @@ def main() -> int:
             c_resueltas.append((clave, nombre, base, entrenados[k].n))
     cubiertas = {r[0] for r in c_resueltas}
 
+    # Política `config.json -> auto.solo_modelo_propio` (activada por defecto
+    # porque las ligas con modelo ajeno fueron 0/3): con ella puesta, el bot
+    # tiene motor para estas ligas pero se NIEGA a usarlo. El informe lo
+    # dice en lugar de dar por hecho que las apuesta.
+    try:
+        _auto = base_datos.cargar_config().get("auto", {}) or {}
+    except Exception:                       # noqa: BLE001 (no rompe el informe)
+        _auto = {}
+    solo_propio = bool(_auto.get("solo_modelo_propio", True))
+
     # --- las que no son liga, ni las que van con el modelo de otra ---
+    if c_resueltas:
+        encabezado = (f"el bot YA las apuesta" if not solo_propio else
+                      "el bot NO las apuesta por `solo_modelo_propio`")
+    else:
+        encabezado = "el bot ya apuesta"
     print("\n" + "=" * 78)
-    print(f"D) RESUELTAS CON EL MODELO DE OTRA LIGA — el bot ya apuesta ({len(c_resueltas)})")
+    print(f"D) RESUELTAS CON EL MODELO DE OTRA LIGA ({len(c_resueltas)}) "
+          f"· {encabezado}")
     print("=" * 78)
     for clave, nombre, base, n in c_resueltas:
         print(f"   {clave:38s} -> modelo {base} (n={n})  [{nombre[:24]}]")
@@ -157,9 +174,13 @@ def main() -> int:
     print(f"   B': {len(sin_cobertura):3d} sin estadísticas en API-Sports → respaldo")
     print(f"   C:  {len(c):3d} sin traducción → añadir su id")
     print(f"   E:  {len(no_liga):3d} no son ligas")
-    total_apostables = len(a) + len(c_resueltas)
-    print(f"\n   ligas apostables por el bot: {total_apostables} de "
-          f"{len(vivas) - len(no_liga)}")
+    total_apostables = len(a) + (0 if solo_propio else len(c_resueltas))
+    print(f"\n   ligas apostables con la política actual: "
+          f"{total_apostables} de {len(vivas) - len(no_liga)}"
+          + ("   (solo modelo propio)" if solo_propio else ""))
+    if c_resueltas and solo_propio:
+        print("   → para que el bot también apueste las de D, pon en "
+              "config.json:  \"auto\": { \"solo_modelo_propio\": false }")
 
     if inv and b:
         print("\n   Temporadas disponibles en API-Sports para las de B:")
@@ -183,8 +204,15 @@ def main() -> int:
             print("\n   → bajar/entrenar: python historico.py --ligas <clave> "
                   "--cubrir 120 --guardar --entrenar")
             return 1
-        print(f"\nCOMPROBACIÓN: OK — las {total_apostables} ligas del feed "
-              f"tienen motor ({len(a)} propios + {len(c_resueltas)} de respaldo)")
+        print(f"\nCOMPROBACIÓN: OK — las {len(a) + len(c_resueltas)} ligas del "
+              f"feed tienen motor ({len(a)} propios + {len(c_resueltas)} de "
+              f"respaldo)")
+        # El gate mide cobertura TÉCNICA. Que el bot decida no usar el
+        # respaldo es una decisión de política, no un fallo: se avisa.
+        if c_resueltas and solo_propio:
+            bloqueadas = ", ".join(k for k, _n, _b, _m in c_resueltas)
+            print(f"   aviso: con `solo_modelo_propio` activo el bot no "
+                  f"apuesta {len(c_resueltas)} de ellas: {bloqueadas}")
         return 0
     return 0
 

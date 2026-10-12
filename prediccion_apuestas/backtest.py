@@ -95,7 +95,8 @@ def _cargar_historico() -> dict[str, list[tuple]]:
 
 def _backtest_liga(partidos: list[tuple], desde: date, hasta: date,
                    umbral: float, verbose: bool,
-                   modo_linea: str = LINEA_POR_DEFECTO) -> dict | None:
+                   modo_linea: str = LINEA_POR_DEFECTO,
+                   umbral_max: float = 0.0) -> dict | None:
     """
     Walk-forward de una liga. Devuelve el resumen, o None si no hay apuestas
     evaluables (historia insuficiente o sin partidos en el rango).
@@ -170,6 +171,11 @@ def _backtest_liga(partidos: list[tuple], desde: date, hasta: date,
 
         if abs(delta) < umbral:
             continue                      # sin apuesta: diferencia pequeña
+        if umbral_max > 0 and abs(delta) > umbral_max:
+            # Lo mismo que hace la app desde UMBRAL_MAX_POR_DEFECTO: un Δ
+            # descomunal se toma por error del modelo, no por valor. Permite
+            # medir el rango real (p. ej. 3 < Δ < 5) que la app apuesta.
+            continue
         apuestas += 1
         if total == linea:
             empatadas += 1                # push: no decide
@@ -214,7 +220,8 @@ SALTO_REENTRENO = 10    # días de historia nuevos entre reentrenamientos
 def backtest(desde: date, hasta: date, umbral: float = UMBRAL_POR_DEFECTO,
              ligas: list[str] | None = None,
              verbose: bool = False,
-             modo_linea: str = LINEA_POR_DEFECTO) -> dict[str, dict]:
+             modo_linea: str = LINEA_POR_DEFECTO,
+             umbral_max: float = 0.0) -> dict[str, dict]:
     """Ejecuta el walk-forward y devuelve el resultado por liga."""
     historico = _cargar_historico()
     resultados: dict[str, dict] = {}
@@ -222,15 +229,18 @@ def backtest(desde: date, hasta: date, umbral: float = UMBRAL_POR_DEFECTO,
         if ligas and liga not in ligas:
             continue
         r = _backtest_liga(partidos, desde, hasta, umbral, verbose and not ligas,
-                           modo_linea)
+                           modo_linea, umbral_max)
         if r:
             resultados[liga] = r
     return resultados
 
 
 def imprimir(resultados: dict[str, dict], desde: date, hasta: date,
-             umbral: float, modo_linea: str = LINEA_POR_DEFECTO) -> None:
-    print(f"Backtest WALK-FORWARD  ·  {desde} → {hasta}  ·  umbral Δ ≥ {umbral} pts")
+             umbral: float, modo_linea: str = LINEA_POR_DEFECTO,
+             umbral_max: float = 0.0) -> None:
+    rango = (f"rango de Δ: {umbral:g} < |Δ| < {umbral_max:g} pts"
+             if umbral_max > 0 else f"umbral Δ ≥ {umbral} pts")
+    print(f"Backtest WALK-FORWARD  ·  {desde} → {hasta}  ·  {rango}")
     if modo_linea == "mitad":
         print("Línea proxy = (1Q+2Q)×2, la proyección de ritmo que usa una casa "
               "real en el descanso.")
@@ -281,6 +291,10 @@ def main() -> int:
                         f"{UMBRAL_POR_DEFECTO})")
     p.add_argument("--umbrales", nargs="*", type=float, default=None,
                    help="compara varios umbrales (p. ej. --umbrales 0 2 3 5)")
+    p.add_argument("--umbral-max", type=float, default=0.0,
+                   help="tope superior del Δ (0 = sin tope). Permite medir "
+                        "el rango que la app apuesta por defecto: "
+                        "--umbral 3 --umbral-max 5")
     p.add_argument("--linea", choices=("mitad", "media"),
                    default=LINEA_POR_DEFECTO,
                    help="proxy de la línea: 'mitad' = (1Q+2Q)×2 (honesto, por "
@@ -298,17 +312,20 @@ def main() -> int:
     todos: dict[float, dict[str, dict]] = {}
     for u in umbrales:
         todos[u] = backtest(desde, hasta, u, args.ligas, args.detallado,
-                            args.linea)
+                            args.linea, args.umbral_max)
         if not todos[u]:
             print("No hay partidos en ese rango de fechas.")
             return 1
 
     if len(umbrales) == 1:
-        imprimir(todos[umbrales[0]], desde, hasta, umbrales[0], args.linea)
+        imprimir(todos[umbrales[0]], desde, hasta, umbrales[0], args.linea,
+                 args.umbral_max)
         return 0
 
     # comparación de umbrales: el objetivo es elegir cuánto Δ exigir
-    print(f"Comparación de umbrales  ·  {desde} → {hasta}\n")
+    etiqueta = (f"{args.umbral:g} < |Δ| < {args.umbral_max:g}"
+                if args.umbral_max > 0 else "|Δ| > umbral")
+    print(f"Comparación de umbrales  ·  {desde} → {hasta}  ·  {etiqueta}\n")
     cab = (f"{'umbral':>7s} {'apuestas':>8s} {'gan':>5s} {'perd':>5s} "
            f"{'WINRATE':>9s} {'ROI':>7s}")
     print(cab)
@@ -321,7 +338,9 @@ def main() -> int:
         wr = (tot["ganadas"] / dec * 100.0) if dec else 0.0
         roi = ((wr / 100.0) * (CUOTA_PROXY - 1.0)
                - (1.0 - wr / 100.0)) * 100.0 if dec else 0.0
-        print(f"{u:7.1f} {tot['apuestas']:8d} {tot['ganadas']:5d} "
+        rotulo = (f"{u:.1f}-{args.umbral_max:g}" if args.umbral_max > 0
+                  else f"{u:.1f}")
+        print(f"{rotulo:>7s} {tot['apuestas']:8d} {tot['ganadas']:5d} "
               f"{tot['perdidas']:5d} {wr:8.1f}% {roi:+6.1f}%")
     return 0
 

@@ -25,7 +25,10 @@ print(f"   db_ok={a.db_ok}  {a.db_error if not a.db_ok else base_datos.descripci
 assert a.db_ok
 print(f"   estado: {a.estado.cget('text')}")
 print(f"   pestañas: {a.notebook.tabs()}")
-assert len(a.notebook.tabs()) == 4
+# EUROLIGA · NBA · EN VIVO · APUESTAS · GRÁFICO (la 5.ª la añadió el gráfico
+# de rendimiento). Se comprueba por nombre para que no se rompa en silencio
+# cuando se añada otra.
+assert len(a.notebook.tabs()) == 5, a.notebook.tabs()
 for liga, m in a.modelos.items():
     print(f"   modelo {liga}: n={m.n} pred_ejemplo_ok={m.n > 0}")
 

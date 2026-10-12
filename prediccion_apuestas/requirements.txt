@@ -1,0 +1,23 @@
+# Dependencias del proyecto. Instalar con:
+#     pip install -r requirements.txt
+#
+# Python 3.13. Tkinter ya viene incluido en el instalador oficial de Python
+# (no aparece aquí porque no se instala con pip).
+
+# Conexión con PostgreSQL (paperbet: apuestas, modelos por liga, memoria
+# de resultados). `binary` trae las librerías compiladas, así que no hace
+# falta tener el servidor de compilación de C en el equipo.
+psycopg2-binary>=2.9
+
+# Scraper del feed Kambi/BetPlay y cliente de la API-Sports.
+requests>=2.31
+
+# Solo la usan los scripts de diagnóstico y medición (diagnostico_edge.py,
+# forense_perdidas.py, motor_gradiente.py, verificar_metodos.py).
+# La app, el bot automático y el backtest NO la necesitan.
+numpy>=2.0
+
+# OPCIONAL, no instalar por defecto. Único uso: la columna LightGBM del
+# torneo de métodos, que compara ese modelo contra el MCO de la app.
+# Si no está instalada, `verificar_metodos.py` se salta con un aviso.
+#     pip install lightgbm

@@ -21,8 +21,16 @@ from __future__ import annotations
 
 from datetime import date
 
-import lightgbm as lgb
 import numpy as np
+
+# LightGBM solo se usa AQUÍ, para comparar contra el MCO de la app. Es una
+# dependencia opcional de este torneo de métodos: la app y el bot NO la
+# necesitan, así que no se instala por defecto y el script se salta con un
+# aviso claro en lugar de romper la batería de pruebas.
+try:
+    import lightgbm as lgb
+except ImportError:                    # noqa: SIM110
+    lgb = None
 
 from backtest_mejoras import _cargar, _siguiente, K_PACE
 
@@ -51,6 +59,14 @@ def _matriz(rows, ritmo, media):
 
 
 def main() -> int:
+    if lgb is None:
+        print("Torneo de MÉTODOS: se omite la comparación con LightGBM.")
+        print("Es una dependencia opcional de este script (la app no la "
+              "usa). Para verla:")
+        print("    pip install lightgbm")
+        print("    python verificar_metodos.py")
+        return 0
+
     desde, hasta = date(2026, 1, 1), date(2026, 12, 31)
     hist = _cargar()
     tot = {"A": [0.0, 0], "B": [0.0, 0], "C": [0.0, 0], "D": [0.0, 0]}

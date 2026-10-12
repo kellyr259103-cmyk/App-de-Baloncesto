@@ -385,6 +385,7 @@ Responde "si hubiéramos usado esta estrategia en 2026, ¿qué winrate tendríam
 ```
 python backtest.py                      # 2026, umbral 2.0, línea honesta
 python backtest.py --umbrales 0 2 3 5   # comparar umbrales
+python backtest.py --umbral 3 --umbral-max 5   # el rango que apuesta la app
 python backtest.py --linea media        # proxy inflado (solo informativo)
 python backtest.py --ligas nba euroleague --detallado
 ```
@@ -409,6 +410,39 @@ python backtest.py --ligas nba euroleague --detallado
 > El modo `--linea media` (79,9 %) es todavía más optimista: compara contra la media
 > de la liga, un mercado que **no se entera del partido**.
 
+### 7.1 ¿Y contra la casa de verdad? (`analisis_delta.py`)
+
+La tabla anterior usa la línea proxy `(1Q+2Q)×2`. La app, en cambio, apuesta
+contra la línea **real** de BetPlay. `analisis_delta.py` mide el winrate por
+tamaño de Δ con las apuestas que el bot ha hecho de verdad, y sale lo
+contrario:
+
+| umbral | backtest (proxy) | real (contra la casa) | n real |
+|---|---|---|---|
+| Δ > 1 | 73,4 % | 31,1 % | 45 |
+| Δ > 2 | 74,9 % | 30,0 % | 40 |
+| Δ > 3 | 76,7 % | 20,6 % | 34 |
+| Δ > 4 | 78,5 % | 21,2 % | 33 |
+| 3 < Δ < 5 | 61,4 % | 0,0 % | 4 |
+
+Con cuota media 1,83 el punto de equilibrio es **54,8 %**: ninguna banda llega
+(beneficio global **−185.600** sobre 46 apuestas, ROI −40 %).
+
+Dos lecturas, y las dos hacen falta:
+
+* **El n real es de 46 apuestas**, con intervalos de ±15 a ±40 puntos. No
+  saques nada de una banda con menos de 10 apuestas: la 2–3 está al 83 % sobre
+  6 apuestas, eso es suerte y no señal.
+* **La brecha entre las dos columnas sí es concluyente**, y no es ruido:
+  confirma el aviso del §7. El modelo no descubre valor contra la línea de la
+  casa porque la casa ya pricea la reversión a la media. Subir o bajar el
+  umbral de Δ no arregla eso: mueve el winrate dentro de un sistema que está
+  por debajo de su propio punto de equilibrio.
+
+Cuando la tabla `señales` acumule muestras resueltas sustituirá a `apuestas`
+aquí, y permitirá medir también las señales que el bot **rechazó**, sin sesgo
+de selección.
+
 ---
 
 ## Archivos
@@ -426,7 +460,9 @@ python backtest.py --ligas nba euroleague --detallado
 | `resultados.py` | Memoria de los resultados finales: guarda el marcador en cuanto se ve y resuelve (o recupera de API-Sports) las apuestas cuyo partido ya salió del feed. |
 | `backtest.py` | Backtest walk-forward de la estrategia del descanso (winrate por liga/umbral). |
 | `diagnostico_backtest.py` | Mide la reversión a la media entre mitades (de dónde sale el edge del backtest). |
+| `analisis_delta.py` | ¿Cómo se comporta el winrate según el tamaño de Δ? Lo responde con las apuestas REALES del bot (bandas y acumulados). |
 | `config.json` | Conexión a PostgreSQL y token de API-Sports (se crea solo). |
+| `requirements.txt` | Dependencias para `pip install -r requirements.txt`. |
 | `verificar.py` | Comprueba que Python = Excel (23 comprobaciones). |
 | `prueba_vivo.py` | Prueba de humo: ping + predicción + resolución de apuesta. |
 | `prueba_bd.py` | Prueba de PostgreSQL: insertar → resolver → resumen → limpiar. |

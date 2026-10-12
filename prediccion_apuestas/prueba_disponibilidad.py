@@ -123,7 +123,10 @@ modelo = a.modelos_ligas[liga]
 q1 = int(modelo.media_1q) if modelo.media_1q else 50
 q2 = int(modelo.media_2q) if modelo.media_2q else 45
 pred = modelo.predecir_dos(q1, q2)
-linea = round(pred - 10.0, 1)
+# Δ = +4, dentro del rango que la app apostará por defecto (3–5); así las
+# secciones siguientes llegan de verdad al mercado y al EV sin que el filtro
+# de rango se los coma antes.
+linea = round(pred - 4.0, 1)
 print(f"   liga={liga} (n={modelo.n})  1Q={q1} 2Q={q2} pred={pred:.1f} "
       f"línea={linea}")
 
@@ -179,11 +182,16 @@ assert "EV=" in regs[0].nota, "la nota debe llevar el valor esperado"
 base_datos.eliminar_apuesta(regs[0].id)
 
 print("\n" + "=" * 72)
-print("6) APUESTA AUNQUE LA LIGA NO TENGA MODELO PROPIO (respaldo NBA)")
+print("6) LIGA SIN MODELO PROPIO: respaldo NBA (con su política)")
 print("=" * 72)
 # REGRESIÓN: el bot miraba `modelos_ligas[clave]` directamente y se negaba a
 # apostar aunque la propia interfaz enseñara VEREDICTO con el modelo del
 # Excel (p. ej. nba_preseason, que cae al de la NBA con n=1340).
+#
+# Y además ahora existe la política `config.json -> auto.solo_modelo_propio`
+# (activada por defecto, porque esas apuestas de respaldo fueron 0/3). Se
+# comprueba lo primero y lo segundo: que al abrirla el circuito original
+# sigue apostando.
 v._motivos_auto.clear()
 v._apuestas_auto.clear()
 v._ventanas.clear()
@@ -199,10 +207,28 @@ print(f"   liga '{p_fb.clave_liga}' no está en modelos_ligas: "
 assert p_fb.clave_liga not in a.modelos_ligas, "la liga debe ser nueva"
 print(f"   modelo que usa: {mfb.liga} (n={mfb.n}) · {etq}")
 assert mfb.n > 0, "el respaldo debe estar entrenado"
-# línea puesta 10 pts por debajo de la predicción: asegura |Δ| grande
-p_fb.linea = round(mfb.predecir_dos(float(q1), float(q2)) - 10.0, 1)
+# Δ = +4, dentro del rango que la app apostará por defecto (3–5)
+p_fb.linea = round(mfb.predecir_dos(float(q1), float(q2)) - 4.0, 1)
 
+_config_real = base_datos.cargar_config
+
+print("   a) política por defecto (solo modelo propio) -> NO apuesta")
 v._auto_apostar_en_descanso([p_fb])
+a.update()
+print(f"   motivo recogido: {dict(v._motivos_auto)}")
+assert 910004 not in v._apuestas_auto, "no debe apostar con modelo ajeno"
+assert any("respaldo" in str(m) for m in v._motivos_auto), v._motivos_auto
+
+print("   b) con `auto.solo_modelo_propio: false` -> SÍ apuesta")
+base_datos.cargar_config = lambda: {**_config_real(),
+                                    "auto": {"solo_modelo_propio": False}}
+v._motivos_auto.clear()
+v._apuestas_auto.clear()
+v._ventanas.clear()
+try:
+    v._auto_apostar_en_descanso([p_fb])
+finally:
+    base_datos.cargar_config = _config_real      # nunca dejarlo parcheado
 a.update()
 print(f"   motivo recogido: {dict(v._motivos_auto)}")
 assert 910004 in v._apuestas_auto, (
